@@ -19,13 +19,16 @@ This package provides a complete implementation of Context-Augmented Generation 
 
 -PLACEHOLDER WORKFLOWS - RAG branch can be pulled as a template / actual Workflows need WORK
 -TESTING REQUIRED
+- The current implementation of multiple KV cache queries is not optimal and could be significantly improved.
+- The RAG implementation is a simplified placeholder and needs to be replaced with a proper vector database integration.
+- Error handling in the n8n workflows and bash scripts could be more robust.
 
 ## Quick Start
 
 ### Step 1: Clone the repository
 
 ```bash
-git clone https://github.com/username/llama-cag-n8n.git
+git clone https://github.com/your-username/llama-cag-n8n.git  <!-- Replace 'your-username' with your actual GitHub username -->
 cd llama-cag-n8n
 ```
 
@@ -118,7 +121,7 @@ The default configuration uses Gemma 4B but you can easily switch by changing th
 
 #### 1. Clone the repository and navigate to it
 ```bash
-git clone https://github.com/username/llama-cag-n8n.git
+git clone https://github.com/your-username/llama-cag-n8n.git  <!-- Replace 'your-username' with your actual GitHub username -->
 cd llama-cag-n8n
 ```
 
@@ -203,6 +206,8 @@ curl -X POST http://localhost:5678/webhook/cag/query \
     "documentSources": ["technical_manual.pdf"]
   }'
 ```
+
+The `cag` in `/webhook/cag/query` is a fixed part of the webhook path. The `documentSources` parameter refers to the filenames of the documents in the watch folder. The system uses the filename and database records to identify the corresponding document and its KV cache.
 
 ### Batch Processing Documents
 
@@ -316,4 +321,5 @@ For OCR functionality to work with scanned PDFs, install these dependencies:
 
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) for enabling local LLM inference with large context windows
 - [n8n](https://n8n.io/) for the workflow automation platform
-
+```
+</write_to_file>
