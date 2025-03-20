@@ -1,0 +1,489 @@
+{
+  "name": "CAG Query Processing",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "cag/query",
+        "options": {
+          "responseMode": "responseNode"
+        },
+        "authentication": "none"
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract and validate query\nconst { query, documentSources } = $input.item.json;\n\n// Generate unique query ID\nconst queryId = `query_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;\n\n// Validate input\nif (!query || typeof query !== 'string' || query.trim() === '') {\n  return {\n    json: {\n      success: false,\n      error: 'Query is required',\n      queryId\n    }\n  };\n}\n\n// Format query for classification\nconst formattedQuery = query.trim();\n\n// Create metadata\nconst metadata = {\n  queryId,\n  query: formattedQuery,\n  documentSources: documentSources || [],\n  timestamp: new Date().toISOString(),\n  processingStartTime: Date.now()\n};\n\nreturn { json: metadata };"
+      },
+      "name": "Extract Query",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Classify if query should use CAG or RAG\nconst { query, queryId, documentSources } = $input.item.json;\n\n// Patterns that suggest CAG is appropriate\nconst cagPatterns = [\n  /what does .* say about/i,\n  /according to .* document/i,\n  /in the .* manual/i,\n  /based on the document/i,\n  /what is mentioned in/i,\n  /how does .* describe/i,\n  /show me .* from the document/i,\n  /extract .* from the document/i,\n  /what is the process for/i,\n  /what are the steps for/i\n];\n\n// Check for CAG patterns\nlet isCagQuery = false;\nlet matchedPattern = null;\n\nfor (const pattern of cagPatterns) {\n  if (pattern.test(query)) {\n    isCagQuery = true;\n    matchedPattern = pattern.toString();\n    break;\n  }\n}\n\n// If documentSources are specified, that's a strong signal for CAG\nif (documentSources && documentSources.length > 0) {\n  isCagQuery = true;\n}\n\n// Determine confidence level\nlet confidence = 'medium';\nif (matchedPattern && documentSources && documentSources.length > 0) {\n  confidence = 'high';\n} else if (!matchedPattern && !documentSources.length) {\n  confidence = 'low';\n}\n\nconst queryType = isCagQuery ? 'cag' : 'rag';\nconst classificationReason = matchedPattern \n  ? `Matched pattern: ${matchedPattern}` \n  : (documentSources.length > 0 \n      ? 'Specific document sources provided' \n      : 'No specific indicators for CAG');\n\nreturn {\n  json: {\n    ...$input.item.json,\n    queryType,\n    confidence,\n    classificationReason\n  }\n};"
+      },
+      "name": "Classify Query",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $input.item.json.queryType === 'cag' ? 0 : 1 }}"
+      },
+      "name": "Route By Query Type",
+      "type": "n8n-nodes-base.router",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Retrieve relevant KV caches based on query\nconst { query, documentSources } = $input.item.json;\n\n// Prepare database query\nlet dbQuery = 'SELECT * FROM cag_document_registry WHERE cag_status = \\'cached\\'';\nlet queryParams = [];\n\n// If document sources are provided, filter by them\nif (documentSources && documentSources.length > 0) {\n  dbQuery += ' AND (';\n  \n  documentSources.forEach((source, index) => {\n    if (index > 0) dbQuery += ' OR ';\n    dbQuery += 'document_id LIKE $' + (index + 1) + ' OR file_name LIKE $' + (index + 1);\n    queryParams.push('%' + source + '%');\n  });\n  \n  dbQuery += ')';\n}\n\n// Add ordering\ndbQuery += ' ORDER BY last_used DESC, usage_count DESC LIMIT 5';\n\n// Return the query to be executed by the DB node\nreturn {\n  json: {\n    ...$input.item.json,\n    dbQuery,\n    queryParams\n  }\n};"
+      },
+      "name": "Prepare CAG Cache Query",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.dbQuery }}",
+        "additionalFields": {
+          "queryParams": "={{ $json.queryParams }}"
+        }
+      },
+      "name": "Find Relevant KV Caches",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1250, 200],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.rows.length }}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "name": "Found KV Caches?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.rows.length }}",
+              "operation": "equal",
+              "value2": 1
+            }
+          ]
+        }
+      },
+      "name": "Single or Multiple Caches?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1650, 100]
+    },
+    {
+      "parameters": {
+        "command": "=cag-scripts/query_kv_cache.sh /usr/local/llamacpp/models/{{ $env.LLAMACPP_MODEL_NAME || 'gemma-4b.gguf' }} {{ $json.rows[0].kv_cache_path }} \"{{ $json.query }}\" 1024"
+      },
+      "name": "Query Single KV Cache",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1850, 100]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare command for multiple KV caches\nconst { rows, query } = $input.item.json;\n\n// Extract the model name from environment or use default\nconst modelName = process.env.LLAMACPP_MODEL_NAME || 'gemma-4b.gguf';\n\n// Build command to query multiple caches\nlet cacheFiles = rows.map(row => row.kv_cache_path).join(' ');\n\n// Format command\nconst command = `cag-scripts/query_multiple_kv_caches.sh /usr/local/llamacpp/models/${modelName} \"${query}\" 1024 ${cacheFiles}`;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    command,\n    cacheCount: rows.length\n  }\n};"
+      },
+      "name": "Prepare Multiple KV Cache Query",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1850, 250]
+    },
+    {
+      "parameters": {
+        "command": "={{ $json.command }}"
+      },
+      "name": "Query Multiple KV Caches",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2050, 250]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare traditional RAG query\nconst { query } = $input.item.json;\n\n// For this example, we'll just use a simple prompt\n// In a real implementation, you would use a vector DB like Qdrant\nconst prompt = `You don't have specific document knowledge about this query, so please respond based on your general knowledge or indicate if you need more information.\\n\\nQuery: ${query}`;\n\n// Return the prompt\nreturn {\n  json: {\n    ...$input.item.json,\n    prompt\n  }\n};"
+      },
+      "name": "Prepare RAG Query",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "command": "=cag-scripts/query_kv_cache.sh /usr/local/llamacpp/models/{{ $env.LLAMACPP_MODEL_NAME || 'gemma-4b.gguf' }} {{ $env.LLAMACPP_KV_CACHE_DIR }}/default_prompt.bin \"{{ $json.prompt }}\" 1024"
+      },
+      "name": "Process RAG Query",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Handle fallback when no KV caches found\nconst { query } = $input.item.json;\n\n// Create a fallback prompt\nconst prompt = `I don't have access to specific document knowledge about this query. Let me respond based on general knowledge.\\n\\nQuery: ${query}`;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    prompt,\n    fallback: true\n  }\n};"
+      },
+      "name": "Prepare CAG Fallback",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "command": "=cag-scripts/query_kv_cache.sh /usr/local/llamacpp/models/{{ $env.LLAMACPP_MODEL_NAME || 'gemma-4b.gguf' }} {{ $env.LLAMACPP_KV_CACHE_DIR }}/default_prompt.bin \"{{ $json.prompt }}\" 1024"
+      },
+      "name": "Process CAG Fallback",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition"
+      },
+      "name": "Merge CAG Responses",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [2250, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process response and update usage statistics\nconst { queryId, query, queryType, rows, stdout, stderr, exitCode, processingStartTime } = $input.item.json;\n\n// Calculate processing time\nconst processingTime = Date.now() - processingStartTime;\n\n// Format response\nlet response = stdout;\nif (exitCode !== 0) {\n  response = `Error processing query: ${stderr}`;\n}\n\n// Extract source information\nlet sources = [];\nif (rows && rows.length > 0) {\n  sources = rows.map(row => ({\n    documentId: row.document_id,\n    fileName: row.file_name,\n    section: row.section_title || ''\n  }));\n}\n\n// Create final response object\nconst finalResponse = {\n  queryId,\n  query,\n  response,\n  queryType,\n  sources,\n  processedAt: new Date().toISOString(),\n  processingTime,\n  success: exitCode === 0\n};\n\nreturn { json: finalResponse };"
+      },
+      "name": "Format CAG Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2450, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process RAG response\nconst { queryId, query, queryType, stdout, stderr, exitCode, processingStartTime } = $input.item.json;\n\n// Calculate processing time\nconst processingTime = Date.now() - processingStartTime;\n\n// Format response\nlet response = stdout;\nif (exitCode !== 0) {\n  response = `Error processing query: ${stderr}`;\n}\n\n// Create final response object\nconst finalResponse = {\n  queryId,\n  query,\n  response,\n  queryType,\n  sources: [],\n  processedAt: new Date().toISOString(),\n  processingTime,\n  success: exitCode === 0\n};\n\nreturn { json: finalResponse };"
+      },
+      "name": "Format RAG Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1450, 400]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "query_log",
+        "columns": "query_id, query_text, response_text, query_type, document_sources, processed_at, processing_time",
+        "returnFields": "id",
+        "additionalFields": {}
+      },
+      "name": "Log Query in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [2650, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition"
+      },
+      "name": "Merge All Responses",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [2450, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $input.item.json }}",
+        "options": {}
+      },
+      "name": "Return Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2850, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Query": {
+      "main": [
+        [
+          {
+            "node": "Classify Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Query": {
+      "main": [
+        [
+          {
+            "node": "Route By Query Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route By Query Type": {
+      "main": [
+        [
+          {
+            "node": "Prepare CAG Cache Query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare RAG Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare CAG Cache Query": {
+      "main": [
+        [
+          {
+            "node": "Find Relevant KV Caches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Relevant KV Caches": {
+      "main": [
+        [
+          {
+            "node": "Found KV Caches?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Found KV Caches?": {
+      "main": [
+        [
+          {
+            "node": "Single or Multiple Caches?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare CAG Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Single or Multiple Caches?": {
+      "main": [
+        [
+          {
+            "node": "Query Single KV Cache",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Multiple KV Cache Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Single KV Cache": {
+      "main": [
+        [
+          {
+            "node": "Merge CAG Responses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Multiple KV Cache Query": {
+      "main": [
+        [
+          {
+            "node": "Query Multiple KV Caches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Multiple KV Caches": {
+      "main": [
+        [
+          {
+            "node": "Merge CAG Responses",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Prepare RAG Query": {
+      "main": [
+        [
+          {
+            "node": "Process RAG Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process RAG Query": {
+      "main": [
+        [
+          {
+            "node": "Format RAG Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare CAG Fallback": {
+      "main": [
+        [
+          {
+            "node": "Process CAG Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process CAG Fallback": {
+      "main": [
+        [
+          {
+            "node": "Merge CAG Responses",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge CAG Responses": {
+      "main": [
+        [
+          {
+            "node": "Format CAG Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format CAG Response": {
+      "main": [
+        [
+          {
+            "node": "Merge All Responses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format RAG Response": {
+      "main": [
+        [
+          {
+            "node": "Merge All Responses",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge All Responses": {
+      "main": [
+        [
+          {
+            "node": "Log Query in DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Query in DB": {
+      "main": [
+        [
+          {
+            "node": "Return Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": {},
+  "pinData": {},
+  "versionId": "query-processing-v1.0",
+  "id": "2",
+  "meta": {
+    "instanceId": "local"
+  }
+}

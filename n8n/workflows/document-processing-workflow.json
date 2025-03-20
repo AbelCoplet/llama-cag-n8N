@@ -1,0 +1,421 @@
+{
+  "name": "CAG Document Processing",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "/data/documents",
+        "options": {
+          "recursive": true,
+          "fileExtensions": ["pdf", "txt", "md", "html"]
+        }
+      },
+      "name": "Watch Documents Folder",
+      "type": "n8n-nodes-base.watchFiles",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Classify document and prepare for processing\nconst filePath = $input.item.json.path;\nconst fileName = $input.item.json.name;\nconst fileExtension = fileName.split('.').pop().toLowerCase();\n\n// Generate unique document ID\nconst documentId = fileName.replace(/\\.[^/.]+$/, \"\") + \"_\" + Date.now();\n\n// Set up metadata\nconst metadata = {\n  documentId,\n  fileName,\n  filePath,\n  fileExtension,\n  processingPath: fileExtension === 'pdf' ? 'pdf' : 'text',\n  createdAt: new Date().toISOString(),\n  error: null // Initialize error field\n};\n\n// Log processing start\nconsole.log(`Processing document: ${fileName} (ID: ${documentId})`);\n\nreturn {json: metadata};"
+      },
+      "name": "Classify Document",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $input.item.json.processingPath === 'pdf' ? 0 : 1 }}"
+      },
+      "name": "Route By Type",
+      "type": "n8n-nodes-base.router",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract text from PDF\nconst { filePath, documentId, fileName } = $input.item.json;\n\n// In a real implementation, you would use a PDF extraction tool\n// For demo purposes, we'll mock this by assuming the file contains text\ntry {\n  // Mock implementation - in real scenario use tools like pdftotext or pdfjs\n  const content = `This is extracted text from ${fileName}\\n\\nSection 1: Introduction\\nThis is the introduction section.\\n\\nSection 2: Implementation\\nThis is the implementation section.`;\n  \n  return {\n    json: {\n      ...$input.item.json,\n      content,\n      processingStatus: 'text_extracted',\n      needsOcr: false\n    }\n  };\n} catch (error) {\n  return {\n    json: {\n      ...$input.item.json,\n      error: error.message,\n      processingStatus: 'extraction_failed'\n    }\n  };\n}"
+      },
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process text file directly\nconst { filePath, documentId, fileName } = $input.item.json;\n\n// In a real implementation, read the file content\n// For demo purposes, we'll mock this\ntry {\n  // Mock implementation - in real scenario read the file content\n  const content = `This is text from ${fileName}\\n\\nSection 1: Overview\\nThis is the overview section.\\n\\nSection 2: Details\\nThis section contains details.`;\n  \n  return {\n    json: {\n      ...$input.item.json,\n      content,\n      processingStatus: 'text_extracted'\n    }\n  };\n} catch (error) {\n  return {\n    json: {\n      ...$input.item.json,\n      error: error.message,\n      processingStatus: 'extraction_failed'\n    }\n  };\n}"
+      },
+      "name": "Process Text File",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition"
+      },
+      "name": "Merge Text Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Split document into chunks for processing\nconst { content, documentId, fileName, processingStatus } = $input.item.json;\n\n// Skip if text extraction failed\nif (processingStatus === 'extraction_failed') {\n  return {\n    json: {\n      ...$input.item.json,\n      chunks: [],\n      processingStatus: 'chunking_skipped'\n    }\n  };\n}\n\n// Use a simple chunking strategy for demo\n// In a real implementation, use semantic chunking or better splitting strategies\nconst maxChunkSize = 2000; // characters\nconst overlap = 200; // characters\n\n// Split on section boundaries if possible (look for section headings)\nconst sectionRegex = /\\n\\s*(?:Section|Chapter|SECTION|CHAPTER)\\s*\\d+[:\\.]?\\s+[^\\n]+/g;\nlet sections = [];\nlet lastIndex = 0;\nlet match;\n\nwhile ((match = sectionRegex.exec(content)) !== null) {\n  // Add content from lastIndex to match.index as a section\n  if (match.index > lastIndex) {\n    sections.push(content.substring(lastIndex, match.index));\n  }\n  \n  // Set lastIndex to the end of this match\n  lastIndex = match.index;\n}\n\n// Add the last section\nif (lastIndex < content.length) {\n  sections.push(content.substring(lastIndex));\n}\n\n// If no sections were found, use simple chunking\nif (sections.length === 0) {\n  sections = [content];\n}\n\n// Now split each section into chunks of maximum size\nconst chunks = [];\nsections.forEach((section, sectionIndex) => {\n  // If section is small enough, keep it as one chunk\n  if (section.length <= maxChunkSize) {\n    chunks.push({\n      content: section,\n      sectionIndex,\n      chunkIndex: 0,\n      totalChunksInSection: 1\n    });\n  } else {\n    // Split into chunks\n    let sectionChunks = [];\n    let start = 0;\n    let chunkIndex = 0;\n    \n    while (start < section.length) {\n      const end = Math.min(start + maxChunkSize, section.length);\n      sectionChunks.push({\n        content: section.substring(start, end),\n        sectionIndex,\n        chunkIndex,\n        totalChunksInSection: Math.ceil(section.length / maxChunkSize)\n      });\n      \n      // Move start position for next chunk (with overlap)\n      start = end - overlap;\n      chunkIndex++;\n    }\n    \n    chunks.push(...sectionChunks);\n  }\n});\n\nconst totalChunks = chunks.length;\n\n// Add chunk metadata\nconst chunksWithMetadata = chunks.map((chunk, index) => {\n  // Generate unique chunk ID\n  const chunkId = `${documentId}_chunk${index}`;\n  \n  // Extract section title if possible\n  let sectionTitle = `Section ${chunk.sectionIndex + 1}`;\n  const titleMatch = chunk.content.match(/^\\s*(?:Section|Chapter|SECTION|CHAPTER)\\s*\\d+[:\\.]?\\s+([^\\n]+)/);\n  if (titleMatch) {\n    sectionTitle = titleMatch[1].trim();\n  }\n  \n  return {\n    documentId,\n    fileName,\n    chunkId,\n    chunkIndex: index,\n    totalChunks,\n    sectionTitle,\n    content: chunk.content,\n    chunkSizeChars: chunk.content.length\n  };\n});\n\nreturn {\n  json: {\n    ...$input.item.json,\n    chunks: chunksWithMetadata,\n    totalChunks,\n    processingStatus: 'chunked'\n  }\n};"
+      },
+      "name": "Chunk Document",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "split",
+        "batchSize": 1,
+        "options": {}
+      },
+      "name": "Split Into Chunks",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Get chunks from the input\nconst { chunks } = $input.item.json;\n\n// If no chunks, return empty array\nif (!chunks || !Array.isArray(chunks) || chunks.length === 0) {\n  return {json: []};\n}\n\n// Return the first chunk in the array\nreturn {json: chunks[0]};"
+      },
+      "name": "Get Current Chunk",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "cag_document_registry",
+        "columns": "document_id, chunk_id, file_name, section_title, chunk_index, total_chunks, created_at, cag_status",
+        "returnFields": "id",
+        "additionalFields": {}
+      },
+      "name": "Register Chunk in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1850, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare for KV cache creation\nconst { documentId, chunkId, fileName, content, chunkIndex } = $input.item.json;\n\n// Create a temporary file path for the chunk content\nconst tempDir = '/data/temp_chunks';\nconst tempFile = `${tempDir}/${chunkId}.txt`;\n\n// Generate cache file path\nconst cacheDir = '/data/kv_caches';\nconst cachePath = `${cacheDir}/${documentId}`;\nconst cacheFile = `${cachePath}/${chunkId}.bin`;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    tempFile,\n    cacheFile,\n    processingStatus: 'ready_for_cache'\n  }\n};"
+      },
+      "name": "Prepare KV Cache Paths",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "filePath": "={{ $json.tempFile }}",
+        "fileContent": "={{ $json.content }}"
+      },
+      "name": "Write Chunk to Temp File",
+      "type": "n8n-nodes-base.writeFile",
+      "typeVersion": 1,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "command": "=cag-scripts/create_kv_cache.sh /usr/local/llamacpp/models/{{ $env.LLAMACPP_MODEL_NAME || 'gemma-4b.gguf' }} {{ $json.tempFile }} {{ $json.cacheFile }}",
+        "options": {
+          "cwd": "/usr/local/bin"
+        }
+      },
+      "name": "Create KV Cache",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.exitCode }}",
+              "operation": "equal",
+              "value2": "0"
+            }
+          ]
+        }
+      },
+      "name": "Cache Created Successfully?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": "public",
+        "table": "cag_document_registry",
+        "updateKey": "chunk_id",
+        "columns": "kv_cache_path, cag_status, processed_at, last_used, usage_count",
+        "additionalFields": {
+          "kv_cache_path": "={{ $json.cacheFile }}",
+          "cag_status": "=cached",
+          "processed_at": "=NOW()",
+          "last_used": "={{ null }}",
+          "usage_count": "={{ 0 }}"
+        }
+      },
+      "name": "Update Success in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [2850, 200],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": "public",
+        "table": "cag_document_registry",
+        "updateKey": "chunk_id",
+        "columns": "cag_status, error_message, last_used, usage_count",
+        "additionalFields": {
+          "cag_status": "=failed",
+          "error_message": "={{ $json.stderr || 'KV cache creation failed' }}",
+          "last_used": "={{ null }}",
+          "usage_count": "={{ 0 }}"
+        }
+      },
+      "name": "Update Failure in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [2850, 400],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "filePath": "={{ $json.tempFile }}"
+      },
+      "name": "Delete Temp File",
+      "type": "n8n-nodes-base.deleteFile",
+      "typeVersion": 1,
+      "position": [3050, 300]
+    }
+  ],
+  "connections": {
+    "Watch Documents Folder": {
+      "main": [
+        [
+          {
+            "node": "Classify Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Document": {
+      "main": [
+        [
+          {
+            "node": "Route By Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route By Type": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Process Text File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Merge Text Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Text File": {
+      "main": [
+        [
+          {
+            "node": "Merge Text Sources",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Text Sources": {
+      "main": [
+        [
+          {
+            "node": "Chunk Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunk Document": {
+      "main": [
+        [
+          {
+            "node": "Split Into Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Into Chunks": {
+      "main": [
+        [
+          {
+            "node": "Get Current Chunk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Current Chunk": {
+      "main": [
+        [
+          {
+            "node": "Register Chunk in DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Register Chunk in DB": {
+      "main": [
+        [
+          {
+            "node": "Prepare KV Cache Paths",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare KV Cache Paths": {
+      "main": [
+        [
+          {
+            "node": "Write Chunk to Temp File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Chunk to Temp File": {
+      "main": [
+        [
+          {
+            "node": "Create KV Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create KV Cache": {
+      "main": [
+        [
+          {
+            "node": "Cache Created Successfully?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Created Successfully?": {
+      "main": [
+        [
+          {
+            "node": "Update Success in DB",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Failure in DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Success in DB": {
+      "main": [
+        [
+          {
+            "node": "Delete Temp File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Failure in DB": {
+      "main": [
+        [
+          {
+            "node": "Delete Temp File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": {},
+  "pinData": {},
+  "versionId": "document-processing-v1.0",
+  "id": "1",
+  "meta": {
+    "instanceId": "local"
+  }
+}
