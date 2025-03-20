@@ -1,3 +1,5 @@
+![Overview](docs/images/Overview.png)
+
 # llama-cag-n8n
 
 WORK IN PROGRESS
