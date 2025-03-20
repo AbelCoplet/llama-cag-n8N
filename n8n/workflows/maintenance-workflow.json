@@ -1,0 +1,289 @@
+{
+    "name": "CAG System Maintenance",
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours",
+                "hour": 2
+              }
+            ]
+          }
+        },
+        "name": "Schedule",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1,
+        "position": [250, 300]
+      },
+      {
+        "parameters": {
+          "functionCode": "/**\n * CAG System Maintenance Tasks\n * Runs daily to perform system maintenance, cleanup, and monitoring\n */\n\n// Configuration\nconst config = {\n  // Age thresholds\n  tempFileMaxAgeDays: 1,           // Temp files older than this will be removed\n  failedCacheMaxAgeDays: 7,         // Failed cache entries older than this will be cleared\n  orphanedCacheMaxAgeDays: 14,      // KV cache files with no DB entry older than this will be removed\n  \n  // Directories\n  baseTemp: process.env.LLAMACPP_TEMP_DIR || '/data/temp_chunks',\n  baseCache: process.env.LLAMACPP_KV_CACHE_DIR || '/data/kv_caches',\n  \n  // Limits\n  maxFilesToProcess: 1000,          // Safety limit for file operations\n  dryRun: false                     // Set to true to just log without deleting\n};\n\n// Helper function to execute commands\nasync function execCommand(command) {\n  try {\n    const { stdout, stderr } = await $exec(command);\n    return { success: true, stdout, stderr };\n  } catch (error) {\n    return { success: false, error: error.message };\n  }\n}\n\n// Main maintenance tasks\nasync function runMaintenance() {\n  const results = {\n    tempFilesRemoved: 0,\n    orphanedCachesRemoved: 0,\n    failedEntriesCleared: 0,\n    errors: []\n  };\n  \n  try {\n    // 1. Clean up old temporary files\n    console.log(`Checking for temporary files older than ${config.tempFileMaxAgeDays} days...`);\n    const tempCommand = `find \"${config.baseTemp}\" -type f -mtime +${config.tempFileMaxAgeDays} -print ${config.dryRun ? '' : '-delete'}`;\n    const tempResult = await execCommand(tempCommand);\n    \n    if (tempResult.success) {\n      // Count files from output\n      const files = tempResult.stdout.trim().split('\\n').filter(line => line.length > 0);\n      results.tempFilesRemoved = files.length;\n      console.log(`Removed ${results.tempFilesRemoved} old temporary files`);\n    } else {\n      results.errors.push(`Failed to clean temp files: ${tempResult.error}`);\n    }\n    \n    // 2. Clean up empty directories in temp\n    await execCommand(`find \"${config.baseTemp}\" -type d -empty -delete`);\n    \n    // 3. Query database for failed entries\n    // This would typically be handled by a Postgres node following this Function node\n    results.dbQueryForFailed = `\n      SELECT document_id, chunk_id, kv_cache_path, error_message \n      FROM cag_document_registry \n      WHERE cag_status = 'failed' \n      AND processed_at < NOW() - INTERVAL '${config.failedCacheMaxAgeDays} days'\n    `;\n    \n    // 4. Query database for all valid cache paths\n    results.dbQueryForValidCaches = `\n      SELECT kv_cache_path \n      FROM cag_document_registry \n      WHERE kv_cache_path IS NOT NULL\n    `;\n    \n    // 5. Find all actual cache files (would be implemented after DB queries)\n    results.findCachesCommand = `find \"${config.baseCache}\" -type f -name \"*.bin\" | head -n ${config.maxFilesToProcess}`;\n    \n    // Return information for subsequent nodes\n    return {\n      maintenanceResults: results,\n      queries: {\n        failedEntries: results.dbQueryForFailed,\n        validCaches: results.dbQueryForValidCaches\n      },\n      commands: {\n        findCaches: results.findCachesCommand,\n        cleanEmptyDirs: `find \"${config.baseCache}\" -type d -empty -delete`\n      },\n      config: config\n    };\n  } catch (error) {\n    results.errors.push(`Maintenance error: ${error.message}`);\n    return { error: error.message, maintenanceResults: results };\n  }\n}\n\n// Execute maintenance and return results\nreturn await runMaintenance();"
+        },
+        "name": "Prepare Maintenance Tasks",
+        "type": "n8n-nodes-base.function",
+        "typeVersion": 1,
+        "position": [450, 300]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "={{ $json.queries.failedEntries }}"
+        },
+        "name": "Find Failed Entries",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 1,
+        "position": [650, 200],
+        "credentials": {
+          "postgres": {
+            "id": "1",
+            "name": "PostgreSQL account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "={{ $json.queries.validCaches }}"
+        },
+        "name": "Get Valid Cache Paths",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 1,
+        "position": [650, 400],
+        "credentials": {
+          "postgres": {
+            "id": "1",
+            "name": "PostgreSQL account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "command": "={{ $json.commands.findCaches }}"
+        },
+        "name": "Find All Cache Files",
+        "type": "n8n-nodes-base.executeCommand",
+        "typeVersion": 1,
+        "position": [850, 400]
+      },
+      {
+        "parameters": {
+          "functionCode": "// Process failed entries and prepare cleanup\nconst { rows } = $input.item.json;\nconst failedCacheMaxAgeDays = $input.item.json.config?.failedCacheMaxAgeDays || 7;\n\n// Prepare info for logging and cleanup\nconst failedEntries = rows.map(row => ({\n  documentId: row.document_id,\n  chunkId: row.chunk_id,\n  cachePath: row.kv_cache_path,\n  errorMessage: row.error_message?.substring(0, 100) || 'Unknown error',\n  shouldCleanup: row.kv_cache_path && row.kv_cache_path.trim().length > 0\n}));\n\n// Group by document for better reporting\nconst failedByDocument = {};\nfailedEntries.forEach(entry => {\n  if (!failedByDocument[entry.documentId]) {\n    failedByDocument[entry.documentId] = [];\n  }\n  failedByDocument[entry.documentId].push(entry);\n});\n\n// Prepare summary\nconst documentCount = Object.keys(failedByDocument).length;\nconst chunkCount = failedEntries.length;\nconst cleanupCount = failedEntries.filter(e => e.shouldCleanup).length;\n\n// Prepare commands to clean up failed KV caches\nconst cleanupCommands = failedEntries\n  .filter(e => e.shouldCleanup)\n  .map(e => `rm -f \"${e.cachePath}\"`);\n\nconst updateQuery = `\n  UPDATE cag_document_registry\n  SET cag_status = 'cleanup_failed', \n      error_message = CONCAT(error_message, ' [Cleaned up after ${failedCacheMaxAgeDays} days: ', NOW(), ']')\n  WHERE cag_status = 'failed' \n  AND processed_at < NOW() - INTERVAL '${failedCacheMaxAgeDays} days'\n`;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    failedEntries,\n    failedByDocument,\n    documentCount,\n    chunkCount,\n    cleanupCount,\n    cleanupCommands,\n    updateQuery\n  }\n};"
+        },
+        "name": "Process Failed Entries",
+        "type": "n8n-nodes-base.function",
+        "typeVersion": 1,
+        "position": [850, 200]
+      },
+      {
+        "parameters": {
+          "functionCode": "// Find orphaned cache files (files without DB entries)\nconst { stdout } = $input.item.json;\nconst validCachePaths = $input.item.json.rows.map(row => row.kv_cache_path);\n\n// Parse cache files from command output\nconst allCacheFiles = stdout.trim().split('\\n')\n  .filter(path => path && path.endsWith('.bin'));\n\n// Find orphaned files (those not in the DB)\nconst orphanedFiles = allCacheFiles.filter(filePath => \n  !validCachePaths.includes(filePath)\n);\n\n// Prepare cleanup command for orphaned files\nconst cleanupCommands = [];\nif (orphanedFiles.length > 0) {\n  for (const file of orphanedFiles) {\n    cleanupCommands.push(`rm -f \"${file}\"`);\n  }\n}\n\n// Get total size of orphaned files\nlet totalSize = '0';\nif (orphanedFiles.length > 0) {\n  try {\n    // Create a temporary file with the list of orphaned files\n    const tempListFile = `/tmp/orphaned_files_${Date.now()}.txt`;\n    await $exec(`echo \"${orphanedFiles.join('\\n')}\" > \"${tempListFile}\"`);\n    \n    // Use du to get total size\n    const { stdout: sizeOutput } = await $exec(`cat \"${tempListFile}\" | xargs du -ch | tail -n 1`);\n    totalSize = sizeOutput.trim().split('\\t')[0];\n    \n    // Clean up temp file\n    await $exec(`rm -f \"${tempListFile}\"`);\n  } catch (e) {\n    console.error(`Error calculating size: ${e.message}`);\n  }\n}\n\nreturn {\n  json: {\n    ...$input.item.json,\n    allCacheFiles: allCacheFiles.length,\n    orphanedFiles,\n    orphanedCount: orphanedFiles.length,\n    orphanedSize: totalSize,\n    cleanupCommands\n  }\n};"
+        },
+        "name": "Find Orphaned Files",
+        "type": "n8n-nodes-base.function",
+        "typeVersion": 1,
+        "position": [1050, 400]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "={{ $json.updateQuery }}"
+        },
+        "name": "Update Failed Entries",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 1,
+        "position": [1050, 200],
+        "credentials": {
+          "postgres": {
+            "id": "1",
+            "name": "PostgreSQL account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "command": "={{ $json.cleanupCommands.join(' && ') }}"
+        },
+        "name": "Cleanup Failed Caches",
+        "type": "n8n-nodes-base.executeCommand",
+        "typeVersion": 1,
+        "position": [1250, 200]
+      },
+      {
+        "parameters": {
+          "command": "={{ $json.cleanupCommands.join(' && ') }}"
+        },
+        "name": "Cleanup Orphaned Files",
+        "type": "n8n-nodes-base.executeCommand",
+        "typeVersion": 1,
+        "position": [1250, 400]
+      },
+      {
+        "parameters": {
+          "command": "={{ $json.commands.cleanEmptyDirs }}"
+        },
+        "name": "Clean Empty Directories",
+        "type": "n8n-nodes-base.executeCommand",
+        "typeVersion": 1,
+        "position": [1450, 300]
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "WITH stats AS (\n  SELECT \n    COUNT(*) AS total_documents,\n    SUM(CASE WHEN status = 'cached' THEN 1 ELSE 0 END) AS cached_documents,\n    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_documents\n  FROM documents\n),\nchunk_stats AS (\n  SELECT\n    COUNT(*) AS total_chunks,\n    SUM(CASE WHEN cag_status = 'cached' THEN 1 ELSE 0 END) AS cached_chunks,\n    SUM(CASE WHEN cag_status = 'failed' THEN 1 ELSE 0 END) AS failed_chunks,\n    SUM(CASE WHEN cag_status = 'cached' THEN context_size ELSE 0 END) AS total_context_size\n  FROM cag_document_registry\n)\nINSERT INTO processing_stats (\n  record_date, documents_processed, chunks_processed, \n  documents_failed, chunks_failed, avg_processing_time_ms, \n  total_cache_size_bytes, metadata\n)\nSELECT \n  CURRENT_DATE,\n  stats.cached_documents,\n  chunk_stats.cached_chunks,\n  stats.failed_documents,\n  chunk_stats.failed_chunks,\n  NULL,\n  NULL,\n  jsonb_build_object(\n    'total_documents', stats.total_documents,\n    'total_chunks', chunk_stats.total_chunks,\n    'total_context_size', chunk_stats.total_context_size,\n    'maintenance_report', jsonb_build_object(\n      'failed_cleaned', {{ $node[\"Cleanup Failed Caches\"].context[\"success\"] }},\n      'orphaned_cleaned', {{ $node[\"Cleanup Orphaned Files\"].context[\"success\"] }},\n      'orphaned_count', {{ $json.orphanedCount }},\n      'orphaned_size', '{{ $json.orphanedSize }}'\n    )\n  )\nFROM stats, chunk_stats\nON CONFLICT (record_date) DO UPDATE\nSET \n  documents_processed = EXCLUDED.documents_processed,\n  chunks_processed = EXCLUDED.chunks_processed,\n  documents_failed = EXCLUDED.documents_failed,\n  chunks_failed = EXCLUDED.chunks_failed,\n  metadata = processing_stats.metadata || EXCLUDED.metadata\nRETURNING *;"
+        },
+        "name": "Record Daily Stats",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 1,
+        "position": [1650, 300],
+        "credentials": {
+          "postgres": {
+            "id": "1",
+            "name": "PostgreSQL account"
+          }
+        }
+      }
+    ],
+    "connections": {
+      "Schedule": {
+        "main": [
+          [
+            {
+              "node": "Prepare Maintenance Tasks",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Maintenance Tasks": {
+        "main": [
+          [
+            {
+              "node": "Find Failed Entries",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Get Valid Cache Paths",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Find Failed Entries": {
+        "main": [
+          [
+            {
+              "node": "Process Failed Entries",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Valid Cache Paths": {
+        "main": [
+          [
+            {
+              "node": "Find All Cache Files",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Find All Cache Files": {
+        "main": [
+          [
+            {
+              "node": "Find Orphaned Files",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Failed Entries": {
+        "main": [
+          [
+            {
+              "node": "Update Failed Entries",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Find Orphaned Files": {
+        "main": [
+          [
+            {
+              "node": "Cleanup Orphaned Files",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Update Failed Entries": {
+        "main": [
+          [
+            {
+              "node": "Cleanup Failed Caches",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Cleanup Failed Caches": {
+        "main": [
+          [
+            {
+              "node": "Clean Empty Directories",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Cleanup Orphaned Files": {
+        "main": [
+          [
+            {
+              "node": "Clean Empty Directories",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Clean Empty Directories": {
+        "main": [
+          [
+            {
+              "node": "Record Daily Stats",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "saveExecutionProgress": true,
+      "callerPolicy": "workflowsFromSameOwner",
+      "errorWorkflow": ""
+    },
+    "staticData": {},
+    "pinData": {},
+    "versionId": "cag-maintenance-v1.0",
+    "id": "3",
+    "meta": {
+      "instanceId": "local"
+    }
+  }

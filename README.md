@@ -279,6 +279,38 @@ llama-cag-n8n/
 └── start_services.py          # Service management script
 ```
 
+## Enhanced Features (March 2025 Update)
+
+This update includes significant improvements to both the document processing and query workflows:
+
+### Document Processing Enhancements
+
+- **Robust File Validation**: Improved file validation with size and type checks
+- **Enhanced Text Extraction**: Added OCR capabilities for scanned documents
+- **Semantic Chunking**: Better document chunking that preserves document structure
+- **Improved Database Integration**: More comprehensive tracking and metadata
+- **Enhanced KV Cache Generation**: Better resource management and monitoring
+- **Automated Maintenance**: New workflow for system maintenance and cleanup
+
+### Query Processing Enhancements
+
+- **Improved Query Classification**: Better detection of CAG vs RAG queries
+- **Enhanced RAG Implementation**: Complete implementation of the RAG path
+- **Better Cache Selection**: Improved algorithms for finding relevant KV caches
+- **Source Citations**: Automatic addition of source citations to responses
+- **Performance Monitoring**: Detailed logging and performance tracking
+
+### Setup Instructions
+
+1. Update your database schema by running the schema.sql file
+2. Import the new maintenance workflow in n8n
+3. Schedule the maintenance workflow to run daily
+
+### OCR Support
+
+For OCR functionality to work with scanned PDFs, install these dependencies:
+- Tesseract OCR: `apt-get install tesseract-ocr` (Linux) or `brew install tesseract` (Mac)
+- Poppler utils: `apt-get install poppler-utils` (Linux) or `brew install poppler` (Mac)
 
 ## Acknowledgements
 

@@ -6,7 +6,7 @@
         "path": "/data/documents",
         "options": {
           "recursive": true,
-          "fileExtensions": ["pdf", "txt", "md", "html"]
+          "fileExtensions": ["pdf", "txt", "md", "html", "docx"]
         }
       },
       "name": "Watch Documents Folder",
@@ -16,12 +16,48 @@
     },
     {
       "parameters": {
-        "functionCode": "// Classify document and prepare for processing\nconst filePath = $input.item.json.path;\nconst fileName = $input.item.json.name;\nconst fileExtension = fileName.split('.').pop().toLowerCase();\n\n// Generate unique document ID\nconst documentId = fileName.replace(/\\.[^/.]+$/, \"\") + \"_\" + Date.now();\n\n// Set up metadata\nconst metadata = {\n  documentId,\n  fileName,\n  filePath,\n  fileExtension,\n  processingPath: fileExtension === 'pdf' ? 'pdf' : 'text',\n  createdAt: new Date().toISOString(),\n  error: null // Initialize error field\n};\n\n// Log processing start\nconsole.log(`Processing document: ${fileName} (ID: ${documentId})`);\n\nreturn {json: metadata};"
+        "functionCode": "// Validate document and prepare for processing\nconst filePath = $input.item.json.path;\nconst fileName = $input.item.json.name;\nconst fileExtension = fileName.split('.').pop().toLowerCase();\nconst fileSize = $input.item.json.size || 0;\n\n// Document validation configuration\nconst MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB max\nconst MIN_FILE_SIZE = 10; // 10 bytes min\nconst SUPPORTED_EXTENSIONS = ['pdf', 'txt', 'md', 'html', 'docx'];\nconst EXCLUDED_PATTERNS = [/^\\./,  /~$/, /^\\$/, /\\.temp$/, /\\.tmp$/];\n\n// Validate file\nlet isValid = true;\nlet validationMessage = \"Document valid\";\n\n// Check file size\nif (fileSize > MAX_FILE_SIZE) {\n  isValid = false;\n  validationMessage = `File too large: ${(fileSize / (1024 * 1024)).toFixed(2)}MB exceeds limit of ${MAX_FILE_SIZE / (1024 * 1024)}MB`;\n} else if (fileSize < MIN_FILE_SIZE) {\n  isValid = false;\n  validationMessage = `File too small: ${fileSize} bytes is below minimum of ${MIN_FILE_SIZE} bytes`;\n}\n\n// Check file extension\nif (!SUPPORTED_EXTENSIONS.includes(fileExtension)) {\n  isValid = false;\n  validationMessage = `Unsupported file type: .${fileExtension}. Supported types: ${SUPPORTED_EXTENSIONS.join(', ')}`;\n}\n\n// Check excluded patterns\nfor (const pattern of EXCLUDED_PATTERNS) {\n  if (pattern.test(fileName)) {\n    isValid = false;\n    validationMessage = `File matches excluded pattern: ${pattern}`;\n    break;\n  }\n}\n\n// Generate unique document ID - with collision avoidance\nconst timestamp = Date.now();\nconst randomStr = Math.random().toString(36).substring(2, 7);\nconst sanitizedName = fileName.replace(/\\.[^/.]+$/, \"\").replace(/[^a-zA-Z0-9]/g, \"_\");\nconst documentId = `${sanitizedName}_${timestamp}_${randomStr}`;\n\n// Set up metadata\nconst metadata = {\n  documentId,\n  fileName,\n  filePath,\n  fileExtension,\n  fileSize,\n  processingPath: fileExtension === 'pdf' ? 'pdf' : 'text',\n  isValid,\n  validationMessage,\n  createdAt: new Date().toISOString(),\n  error: null // Initialize error field\n};\n\n// Log processing start or validation error\nif (isValid) {\n  console.log(`Processing document: ${fileName} (ID: ${documentId})`);\n} else {\n  console.log(`Document validation failed: ${fileName} - ${validationMessage}`);\n}\n\nreturn {json: metadata};"
       },
-      "name": "Classify Document",
+      "name": "Validate Document",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.isValid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Is Document Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "documents",
+        "columns": "document_id, file_name, file_path, created_at, status, error_message",
+        "returnFields": "id",
+        "additionalFields": {}
+      },
+      "name": "Log Invalid Document",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [800, 500],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL account"
+        }
+      }
     },
     {
       "parameters": {
@@ -31,25 +67,25 @@
       "name": "Route By Type",
       "type": "n8n-nodes-base.router",
       "typeVersion": 1,
-      "position": [650, 300]
+      "position": [800, 300]
     },
     {
       "parameters": {
-        "functionCode": "// Extract text from PDF\nconst { filePath, documentId, fileName } = $input.item.json;\n\n// In a real implementation, you would use a PDF extraction tool\n// For demo purposes, we'll mock this by assuming the file contains text\ntry {\n  // Mock implementation - in real scenario use tools like pdftotext or pdfjs\n  const content = `This is extracted text from ${fileName}\\n\\nSection 1: Introduction\\nThis is the introduction section.\\n\\nSection 2: Implementation\\nThis is the implementation section.`;\n  \n  return {\n    json: {\n      ...$input.item.json,\n      content,\n      processingStatus: 'text_extracted',\n      needsOcr: false\n    }\n  };\n} catch (error) {\n  return {\n    json: {\n      ...$input.item.json,\n      error: error.message,\n      processingStatus: 'extraction_failed'\n    }\n  };\n}"
+        "functionCode": "// Extract text from PDF using external tools\nconst { filePath, documentId, fileName, fileSize } = $input.item.json;\n\n// Skip processing if document was invalid\nif ($input.item.json.isValid === false) {\n  return {\n    json: {\n      ...$input.item.json,\n      content: '',\n      processingStatus: 'validation_failed',\n      error: $input.item.json.validationMessage\n    }\n  };\n}\n\ntry {\n  // First attempt extraction using pdftotext (more reliable for most PDFs)\n  const pdfCommand = `pdftotext -layout -enc UTF-8 \"${filePath}\" -`;\n  let textContent = '';\n  let needsOcr = false;\n  \n  try {\n    const { stdout, stderr, exitCode } = await $exec(pdfCommand);\n    \n    if (exitCode === 0 && stdout.trim().length > 0) {\n      textContent = stdout;\n    } else {\n      console.log(`pdftotext extraction failed or returned empty: ${stderr}`);\n      needsOcr = true;\n    }\n  } catch (cmdError) {\n    console.log(`pdftotext command failed: ${cmdError.message}`);\n    needsOcr = true;\n  }\n  \n  // If text extraction failed or returned minimal text, try OCR\n  if (needsOcr || textContent.trim().length < Math.min(fileSize / 100, 50)) {\n    console.log(`Regular extraction yielded insufficient text, attempting OCR for ${fileName}`);\n    \n    // Use tesseract OCR (if installed)\n    try {\n      // Convert PDF to images first using pdftoppm\n      const tempImgDir = `/tmp/ocr_${documentId}`;\n      await $exec(`mkdir -p ${tempImgDir}`);\n      \n      // Convert PDF to images (first 20 pages max to avoid excessive processing)\n      await $exec(`pdftoppm -png -r 300 -l 20 \"${filePath}\" ${tempImgDir}/page`);\n      \n      // Process each image with tesseract\n      const { stdout: imgList } = await $exec(`ls ${tempImgDir}/*.png | sort`);\n      const imageFiles = imgList.trim().split('\\n').filter(f => f.length > 0);\n      \n      let ocrText = '';\n      for (const imgFile of imageFiles) {\n        if (!imgFile) continue;\n        const { stdout: pageText } = await $exec(`tesseract \"${imgFile}\" stdout -l eng --oem 1 --psm 3`);\n        ocrText += pageText + '\\n\\n';\n      }\n      \n      // Clean up temp files\n      await $exec(`rm -rf ${tempImgDir}`);\n      \n      if (ocrText.trim().length > 0) {\n        textContent = ocrText;\n        console.log(`OCR successful for ${fileName}, extracted ${textContent.length} characters`);\n      } else {\n        throw new Error(\"OCR extraction produced no text\");\n      }\n    } catch (ocrError) {\n      console.log(`OCR processing failed: ${ocrError.message}`);\n      // If both extraction methods fail, return what we have (might be empty)\n      if (textContent.trim().length === 0) {\n        return {\n          json: {\n            ...$input.item.json,\n            content: '',\n            processingStatus: 'extraction_failed',\n            error: `Both text extraction and OCR failed: ${ocrError.message}`\n          }\n        };\n      }\n    }\n  }\n  \n  // Extract PDF metadata using pdfinfo\n  let metadata = {};\n  try {\n    const { stdout: pdfInfo } = await $exec(`pdfinfo \"${filePath}\"`);\n    pdfInfo.split('\\n').forEach(line => {\n      const parts = line.split(':');\n      if (parts.length >= 2) {\n        const key = parts[0].trim();\n        const value = parts.slice(1).join(':').trim();\n        metadata[key] = value;\n      }\n    });\n  } catch (metaError) {\n    console.log(`Metadata extraction failed: ${metaError.message}`);\n  }\n  \n  // Calculate content hash for deduplication\n  const { stdout: contentHash } = await $exec(`echo \"${textContent.substring(0, 5000)}\" | md5sum | awk '{print $1}'`);\n  \n  return {\n    json: {\n      ...$input.item.json,\n      content: textContent,\n      contentLength: textContent.length,\n      contentHash: contentHash.trim(),\n      documentTitle: metadata['Title'] || fileName,\n      pageCount: parseInt(metadata['Pages'] || '0', 10),\n      author: metadata['Author'] || '',\n      creationDate: metadata['CreationDate'] || '',\n      processingStatus: 'text_extracted',\n      needsOcr\n    }\n  };\n} catch (error) {\n  return {\n    json: {\n      ...$input.item.json,\n      error: error.message,\n      processingStatus: 'extraction_failed'\n    }\n  };\n}"
       },
       "name": "Extract PDF Text",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [850, 200]
+      "position": [1000, 200]
     },
     {
       "parameters": {
-        "functionCode": "// Process text file directly\nconst { filePath, documentId, fileName } = $input.item.json;\n\n// In a real implementation, read the file content\n// For demo purposes, we'll mock this\ntry {\n  // Mock implementation - in real scenario read the file content\n  const content = `This is text from ${fileName}\\n\\nSection 1: Overview\\nThis is the overview section.\\n\\nSection 2: Details\\nThis section contains details.`;\n  \n  return {\n    json: {\n      ...$input.item.json,\n      content,\n      processingStatus: 'text_extracted'\n    }\n  };\n} catch (error) {\n  return {\n    json: {\n      ...$input.item.json,\n      error: error.message,\n      processingStatus: 'extraction_failed'\n    }\n  };\n}"
+        "functionCode": "// Process text file and other non-PDF formats\nconst { filePath, documentId, fileName, fileExtension } = $input.item.json;\n\n// Skip processing if document was invalid\nif ($input.item.json.isValid === false) {\n  return {\n    json: {\n      ...$input.item.json,\n      content: '',\n      processingStatus: 'validation_failed',\n      error: $input.item.json.validationMessage\n    }\n  };\n}\n\ntry {\n  let content = '';\n  let metadataObj = {};\n  \n  // Process based on file extension\n  switch (fileExtension) {\n    case 'txt':\n      // Simple text file reading\n      const { stdout: txtContent } = await $exec(`cat \"${filePath}\"`);\n      content = txtContent;\n      break;\n      \n    case 'md':\n      // Markdown - read as is, but extract metadata if available\n      const { stdout: mdContent } = await $exec(`cat \"${filePath}\"`);\n      content = mdContent;\n      \n      // Extract basic metadata if markdown has front matter\n      if (content.startsWith('---')) {\n        const frontMatterEnd = content.indexOf('---', 3);\n        if (frontMatterEnd > 0) {\n          const frontMatter = content.substring(3, frontMatterEnd).trim();\n          frontMatter.split('\\n').forEach(line => {\n            const parts = line.split(':');\n            if (parts.length >= 2) {\n              const key = parts[0].trim();\n              const value = parts.slice(1).join(':').trim();\n              metadataObj[key] = value;\n            }\n          });\n        }\n      }\n      break;\n      \n    case 'html':\n      // HTML - extract text content without tags\n      const { stdout: htmlContent } = await $exec(`lynx -dump -nolist \"${filePath}\"`);\n      content = htmlContent;\n      break;\n      \n    case 'docx':\n      // DOCX - try to extract using docx2txt or similar\n      try {\n        const { stdout: docxContent } = await $exec(`docx2txt \"${filePath}\" -`);\n        content = docxContent;\n      } catch (docxError) {\n        // Fallback to another method if available\n        try {\n          const { stdout: altDocxContent } = await $exec(`unzip -p \"${filePath}\" word/document.xml | sed -e 's/<[^>]*>//g'`);\n          content = altDocxContent;\n        } catch (altDocxError) {\n          throw new Error(`DOCX extraction failed: ${docxError.message} / ${altDocxError.message}`);\n        }\n      }\n      break;\n      \n    default:\n      // Try to extract text using generic method\n      try {\n        const { stdout: textContent } = await $exec(`strings \"${filePath}\" | head -c 1000000`);\n        content = textContent;\n        console.log(`Used fallback text extraction for unknown format: ${fileExtension}`);\n      } catch (fallbackError) {\n        throw new Error(`Unsupported file type: ${fileExtension}`);\n      }\n  }\n  \n  // Calculate content hash for deduplication\n  const { stdout: contentHash } = await $exec(`echo \"${content.substring(0, 5000)}\" | md5sum | awk '{print $1}'`);\n  \n  // Detect document title from first line or filename\n  let documentTitle = metadataObj.title || '';\n  if (!documentTitle) {\n    const firstLine = content.split('\\n')[0].trim();\n    if (firstLine.length < 100 && firstLine.length > 3) {\n      documentTitle = firstLine;\n    } else {\n      documentTitle = fileName.replace(/\\.[^/.]+$/, \"\");\n    }\n  }\n  \n  return {\n    json: {\n      ...$input.item.json,\n      content,\n      contentLength: content.length,\n      contentHash: contentHash.trim(),\n      documentTitle,\n      metadata: metadataObj,\n      processingStatus: 'text_extracted'\n    }\n  };\n} catch (error) {\n  return {\n    json: {\n      ...$input.item.json,\n      error: error.message,\n      processingStatus: 'extraction_failed'\n    }\n  };\n}"
       },
       "name": "Process Text File",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [850, 400]
+      "position": [1000, 400]
     },
     {
       "parameters": {
@@ -58,16 +94,65 @@
       "name": "Merge Text Sources",
       "type": "n8n-nodes-base.merge",
       "typeVersion": 2,
-      "position": [1050, 300]
+      "position": [1200, 300]
     },
     {
       "parameters": {
-        "functionCode": "// Split document into chunks for processing\nconst { content, documentId, fileName, processingStatus } = $input.item.json;\n\n// Skip if text extraction failed\nif (processingStatus === 'extraction_failed') {\n  return {\n    json: {\n      ...$input.item.json,\n      chunks: [],\n      processingStatus: 'chunking_skipped'\n    }\n  };\n}\n\n// Use a simple chunking strategy for demo\n// In a real implementation, use semantic chunking or better splitting strategies\nconst maxChunkSize = 2000; // characters\nconst overlap = 200; // characters\n\n// Split on section boundaries if possible (look for section headings)\nconst sectionRegex = /\\n\\s*(?:Section|Chapter|SECTION|CHAPTER)\\s*\\d+[:\\.]?\\s+[^\\n]+/g;\nlet sections = [];\nlet lastIndex = 0;\nlet match;\n\nwhile ((match = sectionRegex.exec(content)) !== null) {\n  // Add content from lastIndex to match.index as a section\n  if (match.index > lastIndex) {\n    sections.push(content.substring(lastIndex, match.index));\n  }\n  \n  // Set lastIndex to the end of this match\n  lastIndex = match.index;\n}\n\n// Add the last section\nif (lastIndex < content.length) {\n  sections.push(content.substring(lastIndex));\n}\n\n// If no sections were found, use simple chunking\nif (sections.length === 0) {\n  sections = [content];\n}\n\n// Now split each section into chunks of maximum size\nconst chunks = [];\nsections.forEach((section, sectionIndex) => {\n  // If section is small enough, keep it as one chunk\n  if (section.length <= maxChunkSize) {\n    chunks.push({\n      content: section,\n      sectionIndex,\n      chunkIndex: 0,\n      totalChunksInSection: 1\n    });\n  } else {\n    // Split into chunks\n    let sectionChunks = [];\n    let start = 0;\n    let chunkIndex = 0;\n    \n    while (start < section.length) {\n      const end = Math.min(start + maxChunkSize, section.length);\n      sectionChunks.push({\n        content: section.substring(start, end),\n        sectionIndex,\n        chunkIndex,\n        totalChunksInSection: Math.ceil(section.length / maxChunkSize)\n      });\n      \n      // Move start position for next chunk (with overlap)\n      start = end - overlap;\n      chunkIndex++;\n    }\n    \n    chunks.push(...sectionChunks);\n  }\n});\n\nconst totalChunks = chunks.length;\n\n// Add chunk metadata\nconst chunksWithMetadata = chunks.map((chunk, index) => {\n  // Generate unique chunk ID\n  const chunkId = `${documentId}_chunk${index}`;\n  \n  // Extract section title if possible\n  let sectionTitle = `Section ${chunk.sectionIndex + 1}`;\n  const titleMatch = chunk.content.match(/^\\s*(?:Section|Chapter|SECTION|CHAPTER)\\s*\\d+[:\\.]?\\s+([^\\n]+)/);\n  if (titleMatch) {\n    sectionTitle = titleMatch[1].trim();\n  }\n  \n  return {\n    documentId,\n    fileName,\n    chunkId,\n    chunkIndex: index,\n    totalChunks,\n    sectionTitle,\n    content: chunk.content,\n    chunkSizeChars: chunk.content.length\n  };\n});\n\nreturn {\n  json: {\n    ...$input.item.json,\n    chunks: chunksWithMetadata,\n    totalChunks,\n    processingStatus: 'chunked'\n  }\n};"
+        "functionCode": "// Merge text sources and handle extraction errors\nconst { processingStatus, documentId, fileName } = $input.item.json;\n\n// Handle extraction failures\nif (processingStatus === 'extraction_failed' || processingStatus === 'validation_failed') {\n  console.error(`Cannot process document ${fileName} (${documentId}): ${$input.item.json.error || 'Unknown error'}`);\n  \n  // Insert error record in the database\n  // This could be implemented as a direct database INSERT operation\n  // instead of returning the error for handling later\n  return {\n    json: {\n      ...$input.item.json,\n      chunks: [],\n      totalChunks: 0,\n      processingStatus: 'failed',\n      failureReason: $input.item.json.error || 'Text extraction failed',\n      shouldContinue: false\n    }\n  };\n}\n\n// If content is empty despite successful extraction, log warning\nif ($input.item.json.content.trim().length === 0) {\n  console.warn(`Warning: Document ${fileName} has no extractable text content`);\n  return {\n    json: {\n      ...$input.item.json,\n      content: `[This document appears to contain no extractable text. File: ${fileName}]`,\n      processingStatus: 'empty_content_warning',\n      shouldContinue: true\n    }\n  };\n}\n\n// For successful extraction, continue with the actual content\nreturn {\n  json: {\n    ...$input.item.json,\n    processingStatus: 'merged_content',\n    shouldContinue: true\n  }\n};"
       },
-      "name": "Chunk Document",
+      "name": "Handle Extraction Results",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [1250, 300]
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.shouldContinue }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Continue Processing?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1600, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "documents",
+        "columns": "document_id, file_name, file_path, document_title, content_hash, status, error_message, created_at",
+        "returnFields": "id",
+        "additionalFields": {
+          "page_count": "={{ $json.pageCount || 0 }}",
+          "author": "={{ $json.author || '' }}",
+          "document_type": "={{ $json.fileExtension }}"
+        }
+      },
+      "name": "Register Document in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1800, 500],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Enhanced semantic chunking optimized for large context models\nconst { content, documentId, fileName, documentTitle, processingStatus } = $input.item.json;\n\n// Skip if content extraction failed\nif (processingStatus === 'failed' || processingStatus === 'extraction_failed') {\n  return {\n    json: {\n      ...$input.item.json,\n      chunks: [],\n      processingStatus: 'chunking_skipped'\n    }\n  };\n}\n\n// Configuration adapted for large context window models\nconst maxChunkSize = 10000; // ~2500 tokens, optimized for 128K context models\nconst minChunkSize = 1000;  // Minimum size to avoid tiny chunks\nconst overlap = 500;        // Significant overlap to maintain context\n\n// Identify potential semantic boundaries in decreasing order of importance\nconst semanticBoundaries = [\n  // Major section headers (Markdown, LaTeX, etc.)\n  /\\n#{1,3}\\s+[^\\n]+\\n/g,\n  // Section/Chapter titles\n  /\\n\\s*(?:SECTION|Section|Chapter|CHAPTER|PART|Part)\\s+\\d+[:\\.]?\\s+[^\\n]+\\n/g,\n  // Numerical sections (1.2.3)\n  /\\n\\s*\\d+\\.\\d+(?:\\.\\d+)*\\s+[^\\n]+\\n/g,\n  // Paragraph breaks (double newline)\n  /\\n\\s*\\n/g,\n  // Sentence breaks followed by capital letter\n  /\\.\\s+[A-Z]/g,\n  // Last resort - any sentence break\n  /\\.\\s+/g\n];\n\n// Function to find the best splitting point near target position\nfunction findBestSplittingPoint(text, targetPos) {\n  // Don't split if text is already small enough\n  if (text.length <= maxChunkSize) return text.length;\n  \n  // Look for semantic boundaries, starting from highest priority\n  for (const boundaryPattern of semanticBoundaries) {\n    boundaryPattern.lastIndex = 0; // Reset regex state\n    \n    let bestSplitPos = -1;\n    let bestDistance = Number.MAX_SAFE_INTEGER;\n    let match;\n    \n    // Find all matches\n    while ((match = boundaryPattern.exec(text)) !== null) {\n      // Skip if match is too early in the string\n      if (match.index < minChunkSize) continue;\n      \n      // Skip if match is beyond max size + tolerance\n      if (match.index > maxChunkSize * 1.2) break;\n      \n      // Calculate distance from target position\n      const distance = Math.abs(match.index - targetPos);\n      \n      // If this is closest to target, remember it\n      if (distance < bestDistance) {\n        bestSplitPos = match.index + match[0].length;\n        bestDistance = distance;\n      }\n    }\n    \n    // If we found a good split point with this pattern, use it\n    if (bestSplitPos > 0) {\n      return bestSplitPos;\n    }\n  }\n  \n  // If no good boundary found, just split at max size\n  return Math.min(targetPos, text.length);\n}\n\n// Main chunking algorithm\nfunction createSemanticChunks(text) {\n  const chunks = [];\n  let startPos = 0;\n  \n  while (startPos < text.length) {\n    // Target position for end of this chunk\n    const targetEndPos = startPos + maxChunkSize;\n    \n    // Find best splitting point near target\n    const endPos = findBestSplittingPoint(text.substring(startPos), maxChunkSize);\n    \n    // Extract the chunk\n    const chunkText = text.substring(startPos, startPos + endPos);\n    \n    // Skip empty chunks\n    if (chunkText.trim().length > 0) {\n      chunks.push(chunkText);\n    }\n    \n    // Advance position with overlap\n    startPos += Math.max(endPos - overlap, Math.floor(maxChunkSize / 4));\n    \n    // Prevent infinite loop\n    if (endPos <= 0) break;\n  }\n  \n  return chunks;\n}\n\n// Create chunks using semantic boundaries\nconst textChunks = createSemanticChunks(content);\nconst totalChunks = textChunks.length;\n\n// Function to extract section title from chunk\nfunction extractSectionTitle(chunkText, index) {\n  // Try to find a section header pattern\n  const headerPatterns = [\n    /^\\s*#{1,3}\\s+([^\\n]+)\\n/,\n    /^\\s*(?:SECTION|Section|Chapter|CHAPTER|PART|Part)\\s+\\d+[:\\.]?\\s+([^\\n]+)\\n/,\n    /^\\s*\\d+\\.\\d+(?:\\.\\d+)*\\s+([^\\n]+)\\n/\n  ];\n  \n  for (const pattern of headerPatterns) {\n    const match = chunkText.match(pattern);\n    if (match && match[1]) {\n      return match[1].trim();\n    }\n  }\n  \n  // If no header found, create a title from first content\n  const firstLine = chunkText.trim().split('\\n')[0];\n  if (firstLine && firstLine.length < 80) {\n    return firstLine;\n  }\n  \n  // Fallback to document section number\n  return `${documentTitle || fileName} (Part ${index + 1} of ${totalChunks})`;\n}\n\n// Generate content hash for each chunk\nfunction generateContentHash(text) {\n  // This is a simple hash function, in real implementation use md5/sha1\n  return Array.from(text.substring(0, 1000))\n    .reduce((hash, char) => (((hash << 5) - hash) + char.charCodeAt(0)) | 0, 0)\n    .toString(16);\n}\n\n// Add metadata to each chunk\nconst chunksWithMetadata = textChunks.map((chunkText, index) => {\n  // Generate unique chunk ID\n  const chunkId = `${documentId}_chunk${index + 1}`;\n  \n  // Extract section title\n  const sectionTitle = extractSectionTitle(chunkText, index);\n  \n  // Generate content hash\n  const contentHash = generateContentHash(chunkText);\n  \n  // Estimate token count (rough approximation)\n  const estimatedTokens = Math.ceil(chunkText.length / 4);\n  \n  return {\n    documentId,\n    fileName,\n    chunkId,\n    chunkIndex: index,\n    totalChunks,\n    sectionTitle,\n    chunkSizeChars: chunkText.length,\n    estimatedTokens,\n    contentHash,\n    isFirstChunk: index === 0,\n    isLastChunk: index === totalChunks - 1,\n    content: chunkText\n  };\n});\n\nreturn {\n  json: {\n    ...$input.item.json,\n    chunks: chunksWithMetadata,\n    totalChunks,\n    processingStatus: 'chunked'\n  }\n};"
+      },
+      "name": "Semantic Chunking",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1800, 300]
     },
     {
       "parameters": {
@@ -78,7 +163,7 @@
       "name": "Split Into Chunks",
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 2,
-      "position": [1450, 300]
+      "position": [2000, 300]
     },
     {
       "parameters": {
@@ -87,21 +172,33 @@
       "name": "Get Current Chunk",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [1650, 300]
+      "position": [2200, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare data for database registration\n// This prepares the input for the Postgres node that follows\nconst { documentId, chunkId, fileName, content, sectionTitle, chunkIndex, totalChunks, \n        estimatedTokens, contentHash, chunkSizeChars } = $input.item.json;\n\n// Create ISO timestamp for database \nconst now = new Date().toISOString();\n\n// Prepare data for database insertion with all necessary fields\nreturn {\n  json: {\n    ...$input.item.json,\n    // Fields for database insertion\n    document_id: documentId,\n    chunk_id: chunkId,\n    file_name: fileName,\n    section_title: sectionTitle || `Section ${chunkIndex + 1}`,\n    chunk_index: chunkIndex,\n    total_chunks: totalChunks,\n    created_at: now,\n    cag_status: 'pending',\n    chunk_size_chars: chunkSizeChars,\n    estimated_tokens: estimatedTokens,\n    content_hash: contentHash,\n    // Additional useful metadata\n    document_title: $input.item.json.documentTitle || fileName.replace(/\\.[^/.]+$/, \"\"),\n    is_first_chunk: chunkIndex === 0 ? true : false,\n    is_last_chunk: chunkIndex === totalChunks - 1 ? true : false\n  }\n};"
+      },
+      "name": "Prepare DB Fields",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2400, 300]
     },
     {
       "parameters": {
         "operation": "insert",
         "schema": "public",
         "table": "cag_document_registry",
-        "columns": "document_id, chunk_id, file_name, section_title, chunk_index, total_chunks, created_at, cag_status",
+        "columns": "document_id, chunk_id, file_name, section_title, chunk_index, total_chunks, created_at, cag_status, chunk_size_chars, estimated_tokens, content_hash",
         "returnFields": "id",
-        "additionalFields": {}
+        "additionalFields": {
+          "document_title": "={{ $json.document_title }}",
+          "processing_meta": "={{ JSON.stringify({documentTitle: $json.document_title, isFirstChunk: $json.is_first_chunk, isLastChunk: $json.is_last_chunk}) }}"
+        }
       },
       "name": "Register Chunk in DB",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 1,
-      "position": [1850, 300],
+      "position": [2600, 300],
       "credentials": {
         "postgres": {
           "id": "1",
@@ -111,12 +208,21 @@
     },
     {
       "parameters": {
-        "functionCode": "// Prepare for KV cache creation\nconst { documentId, chunkId, fileName, content, chunkIndex } = $input.item.json;\n\n// Create a temporary file path for the chunk content\nconst tempDir = '/data/temp_chunks';\nconst tempFile = `${tempDir}/${chunkId}.txt`;\n\n// Generate cache file path\nconst cacheDir = '/data/kv_caches';\nconst cachePath = `${cacheDir}/${documentId}`;\nconst cacheFile = `${cachePath}/${chunkId}.bin`;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    tempFile,\n    cacheFile,\n    processingStatus: 'ready_for_cache'\n  }\n};"
+        "functionCode": "// Enhanced KV cache path preparation with validation and error handling\nconst { documentId, chunkId, fileName, content, chunk_index, estimatedTokens } = $input.item.json;\n\n// Create sanitized document ID for folders (remove special chars)\nconst sanitizedDocId = documentId.replace(/[^a-zA-Z0-9_-]/g, '_');\n\n// Create temp and cache directories with date-based organization\nconst currentDate = new Date();\nconst dateFolder = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;\n\n// Base directories (using environment variables)\nconst baseTemp = process.env.LLAMACPP_TEMP_DIR || '/data/temp_chunks';\nconst baseCache = process.env.LLAMACPP_KV_CACHE_DIR || '/data/kv_caches';\n\n// Create structured paths\nconst tempDir = `${baseTemp}/${dateFolder}/${sanitizedDocId}`;\nconst cacheDir = `${baseCache}/${dateFolder}/${sanitizedDocId}`;\n\n// Create unique filenames\nconst safeChunkName = chunkId.replace(/[^a-zA-Z0-9_-]/g, '_');\nconst tempFile = `${tempDir}/${safeChunkName}.txt`;\nconst cacheFile = `${cacheDir}/${safeChunkName}.bin`;\n\n// Create config for model selection based on content size\n// Adjust context size based on chunk size\nlet contextSize = Math.min(Math.max(estimatedTokens * 1.2, 2048), 128000);\ncontextSize = Math.ceil(contextSize / 256) * 256; // Round to nearest 256\n\n// Information about this process\nconst processingMeta = {\n  processingTime: new Date().toISOString(),\n  estimatedContextSize: contextSize,\n  tokensEstimate: estimatedTokens,\n  chunkSizeBytes: content.length\n};\n\nreturn {\n  json: {\n    ...$input.item.json,\n    tempDir,\n    cacheDir,\n    tempFile,\n    cacheFile,\n    contextSize,\n    processingMeta,\n    processingStatus: 'ready_for_cache'\n  }\n};"
       },
       "name": "Prepare KV Cache Paths",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [2050, 300]
+      "position": [2800, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Create necessary directories for temp and cache files\nconst { tempDir, cacheDir } = $input.item.json;\n\ntry {\n  // Create temp directory if it doesn't exist\n  await $exec(`mkdir -p \"${tempDir}\"`);\n  \n  // Create cache directory if it doesn't exist\n  await $exec(`mkdir -p \"${cacheDir}\"`);\n  \n  return {\n    json: {\n      ...$input.item.json,\n      dirCreationStatus: 'success'\n    }\n  };\n} catch (error) {\n  console.error(`Failed to create directories: ${error.message}`);\n  return {\n    json: {\n      ...$input.item.json,\n      dirCreationStatus: 'failed',\n      dirCreationError: error.message\n    }\n  };\n}"
+      },
+      "name": "Create Directories",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [3000, 300]
     },
     {
       "parameters": {
@@ -126,11 +232,20 @@
       "name": "Write Chunk to Temp File",
       "type": "n8n-nodes-base.writeFile",
       "typeVersion": 1,
-      "position": [2250, 300]
+      "position": [3200, 300]
     },
     {
       "parameters": {
-        "command": "=cag-scripts/create_kv_cache.sh /usr/local/llamacpp/models/{{ $env.LLAMACPP_MODEL_NAME || 'gemma-4b.gguf' }} {{ $json.tempFile }} {{ $json.cacheFile }}",
+        "functionCode": "// Prepare enhanced KV cache command with timeout and parameters\nconst { tempFile, cacheFile, contextSize } = $input.item.json;\n\n// Get model path from environment or use default\nconst modelPath = process.env.LLAMACPP_MODEL_PATH || '/usr/local/llamacpp/models/gemma-4b.gguf';\nconst threads = process.env.LLAMACPP_THREADS || '4';\nconst batchSize = process.env.LLAMACPP_BATCH_SIZE || '1024';\n\n// Create enhanced command with timeout and resource management\nconst command = `timeout 600s cag-scripts/create_kv_cache.sh \"${modelPath}\" \"${tempFile}\" \"${cacheFile}\" ${contextSize} ${threads} ${batchSize}`;\n\nreturn {\n  command: command,\n  modelPath: modelPath,\n  contextSize: contextSize,\n  threads: threads\n};"
+      },
+      "name": "Prepare Cache Command",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [3400, 300]
+    },
+    {
+      "parameters": {
+        "command": "={{ $json.command }}",
         "options": {
           "cwd": "/usr/local/bin"
         }
@@ -138,7 +253,7 @@
       "name": "Create KV Cache",
       "type": "n8n-nodes-base.executeCommand",
       "typeVersion": 1,
-      "position": [2450, 300]
+      "position": [3600, 300]
     },
     {
       "parameters": {
@@ -155,7 +270,25 @@
       "name": "Cache Created Successfully?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
-      "position": [2650, 300]
+      "position": [3800, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare fields for database update on success\nconst { cacheFile, contextSize, processingMeta } = $input.item.json;\n\n// Calculate processing duration\nconst startTime = new Date($input.item.json.processingMeta.processingTime);\nconst endTime = new Date();\nconst processingDurationMs = endTime - startTime;\n\n// Enhance metadata with actual processing information\nconst enhancedMeta = {\n  ...processingMeta,\n  processingDurationMs,\n  completedAt: endTime.toISOString(),\n  contextSize,\n  cacheFileSize: null  // Will be filled by shell command if available\n};\n\n// Try to get cache file size\ntry {\n  const { stdout } = await $exec(`stat -c %s \"${cacheFile}\" 2>/dev/null || echo \"unknown\"`);\n  if (stdout && stdout !== \"unknown\") {\n    enhancedMeta.cacheFileSize = parseInt(stdout.trim(), 10);\n  }\n} catch (e) {\n  // Ignore errors when getting file size\n}\n\n// Fields for database update\nreturn {\n  kv_cache_path: cacheFile,\n  cag_status: 'cached',\n  processed_at: endTime.toISOString(),\n  last_used: null,\n  usage_count: 0,\n  context_size: contextSize,\n  processing_meta: JSON.stringify(enhancedMeta)\n};"
+      },
+      "name": "Prepare Success Update",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [4000, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare fields for database update on failure\nconst { stderr, exitCode } = $input.item.json;\nconst processingMeta = $input.item.json.processingMeta || {};\n\n// Calculate processing duration \nconst startTime = new Date(processingMeta.processingTime || new Date());\nconst endTime = new Date();\nconst processingDurationMs = endTime - startTime;\n\n// Create detailed error message\nlet errorDetails = stderr || 'Unknown error during KV cache creation';\nif (exitCode) {\n  errorDetails = `Process exited with code ${exitCode}. ${errorDetails}`;\n}\n\n// Enhance metadata with error information\nconst enhancedMeta = {\n  ...processingMeta,\n  processingDurationMs,\n  failedAt: endTime.toISOString(),\n  exitCode: exitCode || 1,\n  errorSummary: errorDetails.substring(0, 100)\n};\n\n// Fields for database update\nreturn {\n  cag_status: 'failed',\n  error_message: errorDetails,\n  processed_at: endTime.toISOString(),\n  last_used: null,\n  usage_count: 0,\n  processing_meta: JSON.stringify(enhancedMeta)\n};"
+      },
+      "name": "Prepare Failure Update",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [4000, 400]
     },
     {
       "parameters": {
@@ -163,19 +296,13 @@
         "schema": "public",
         "table": "cag_document_registry",
         "updateKey": "chunk_id",
-        "columns": "kv_cache_path, cag_status, processed_at, last_used, usage_count",
-        "additionalFields": {
-          "kv_cache_path": "={{ $json.cacheFile }}",
-          "cag_status": "=cached",
-          "processed_at": "=NOW()",
-          "last_used": "={{ null }}",
-          "usage_count": "={{ 0 }}"
-        }
+        "columns": "kv_cache_path, cag_status, processed_at, last_used, usage_count, context_size, processing_meta",
+        "additionalFields": {}
       },
       "name": "Update Success in DB",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 1,
-      "position": [2850, 200],
+      "position": [4200, 200],
       "credentials": {
         "postgres": {
           "id": "1",
@@ -189,18 +316,13 @@
         "schema": "public",
         "table": "cag_document_registry",
         "updateKey": "chunk_id",
-        "columns": "cag_status, error_message, last_used, usage_count",
-        "additionalFields": {
-          "cag_status": "=failed",
-          "error_message": "={{ $json.stderr || 'KV cache creation failed' }}",
-          "last_used": "={{ null }}",
-          "usage_count": "={{ 0 }}"
-        }
+        "columns": "cag_status, error_message, processed_at, processing_meta",
+        "additionalFields": {}
       },
       "name": "Update Failure in DB",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 1,
-      "position": [2850, 400],
+      "position": [4200, 400],
       "credentials": {
         "postgres": {
           "id": "1",
@@ -210,12 +332,50 @@
     },
     {
       "parameters": {
-        "filePath": "={{ $json.tempFile }}"
+        "mode": "mergeByPosition"
       },
-      "name": "Delete Temp File",
-      "type": "n8n-nodes-base.deleteFile",
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [4400, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Enhanced cleanup function to safely remove temporary files and log operations\nconst { tempFile, tempDir } = $input.item.json;\n\ntry {\n  // Check if temp file exists before deleting\n  const { stdout: fileExists } = await $exec(`test -f \"${tempFile}\" && echo \"1\" || echo \"0\"`);\n  \n  if (fileExists.trim() === \"1\") {\n    // Delete the temp file\n    await $exec(`rm -f \"${tempFile}\"`);\n    console.log(`Deleted temporary file: ${tempFile}`);\n  } else {\n    console.log(`Temporary file already removed or not found: ${tempFile}`);\n  }\n  \n  // Check if temp directory is empty and can be removed\n  const { stdout: dirContents } = await $exec(`find \"${tempDir}\" -type f | wc -l`);\n  \n  if (parseInt(dirContents.trim(), 10) === 0) {\n    // Directory is empty, safe to remove\n    await $exec(`rmdir \"${tempDir}\" 2>/dev/null || true`);\n    console.log(`Removed empty directory: ${tempDir}`);\n  } else {\n    console.log(`Directory still contains files, not removing: ${tempDir}`);\n  }\n  \n  return {\n    json: {\n      ...$input.item.json,\n      cleanupStatus: 'success',\n      cleanupMessage: 'Temporary files cleaned up successfully'\n    }\n  };\n} catch (error) {\n  console.error(`Failed to clean up temporary files: ${error.message}`);\n  \n  // Don't fail the workflow because of cleanup failure\n  return {\n    json: {\n      ...$input.item.json,\n      cleanupStatus: 'warning',\n      cleanupMessage: `Warning: Failed to clean up temporary files: ${error.message}`\n    }\n  };\n}"
+      },
+      "name": "Cleanup Temp Files",
+      "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [3050, 300]
+      "position": [4600, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "processing_errors",
+        "columns": "document_id, chunk_id, error_type, error_message",
+        "returnFields": "id",
+        "additionalFields": {}
+      },
+      "name": "Log Processing Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1800, 700],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "PostgreSQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Prepare error data for logging\nconst { documentId, fileName, error, processingStatus, failureReason } = $input.item.json;\n\nreturn {\n  json: {\n    document_id: documentId,\n    chunk_id: null,  // No chunk ID for document-level errors\n    error_type: processingStatus || 'document_processing_error',\n    error_message: error || failureReason || 'Unknown error',\n    stack_trace: null,\n    occurred_at: new Date().toISOString(),\n    resolved: false\n  }\n};"
+      },
+      "name": "Prepare Error Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1800, 600]
     }
   ],
   "connections": {
@@ -223,18 +383,36 @@
       "main": [
         [
           {
-            "node": "Classify Document",
+            "node": "Validate Document",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Classify Document": {
+    "Validate Document": {
+      "main": [
+        [
+          {
+            "node": "Is Document Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Document Valid?": {
       "main": [
         [
           {
             "node": "Route By Type",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Invalid Document",
             "type": "main",
             "index": 0
           }
@@ -285,16 +463,50 @@
       "main": [
         [
           {
-            "node": "Chunk Document",
+            "node": "Handle Extraction Results",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Chunk Document": {
+    "Handle Extraction Results": {
       "main": [
         [
+          {
+            "node": "Continue Processing?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue Processing?": {
+      "main": [
+        [
+          {
+            "node": "Semantic Chunking",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Error Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Semantic Chunking": {
+      "main": [
+        [
+          {
+            "node": "Register Document in DB",
+            "type": "main",
+            "index": 0
+          },
           {
             "node": "Split Into Chunks",
             "type": "main",
@@ -315,6 +527,17 @@
       ]
     },
     "Get Current Chunk": {
+      "main": [
+        [
+          {
+            "node": "Prepare DB Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare DB Fields": {
       "main": [
         [
           {
@@ -340,6 +563,17 @@
       "main": [
         [
           {
+            "node": "Create Directories",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Directories": {
+      "main": [
+        [
+          {
             "node": "Write Chunk to Temp File",
             "type": "main",
             "index": 0
@@ -348,6 +582,17 @@
       ]
     },
     "Write Chunk to Temp File": {
+      "main": [
+        [
+          {
+            "node": "Prepare Cache Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Cache Command": {
       "main": [
         [
           {
@@ -373,11 +618,33 @@
       "main": [
         [
           {
-            "node": "Update Success in DB",
+            "node": "Prepare Success Update",
             "type": "main",
             "index": 0
           }
         ],
+        [
+          {
+            "node": "Prepare Failure Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Success Update": {
+      "main": [
+        [
+          {
+            "node": "Update Success in DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Failure Update": {
+      "main": [
         [
           {
             "node": "Update Failure in DB",
@@ -391,7 +658,7 @@
       "main": [
         [
           {
-            "node": "Delete Temp File",
+            "node": "Merge Results",
             "type": "main",
             "index": 0
           }
@@ -402,7 +669,29 @@
       "main": [
         [
           {
-            "node": "Delete Temp File",
+            "node": "Merge Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Results": {
+      "main": [
+        [
+          {
+            "node": "Cleanup Temp Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Error Data": {
+      "main": [
+        [
+          {
+            "node": "Log Processing Error",
             "type": "main",
             "index": 0
           }
@@ -410,10 +699,15 @@
       ]
     }
   },
-  "settings": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
   "staticData": {},
   "pinData": {},
-  "versionId": "document-processing-v1.0",
+  "versionId": "document-processing-v2.0",
   "id": "1",
   "meta": {
     "instanceId": "local"
