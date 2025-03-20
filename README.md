@@ -1,5 +1,7 @@
 # llama-cag-n8n
 
+WORK IN PROGRESS
+
 A comprehensive implementation of Context-Augmented Generation (CAG) using llama.cpp and n8n, designed to leverage large context window models (128K+ tokens) for storing and querying entire documents.
 
 ## What is llama-cag-n8n?
@@ -12,6 +14,11 @@ This package provides a complete implementation of Context-Augmented Generation 
 - ✅ **Lower resource usage** - Only processes documents once
 - ✅ **Works offline** - No need for external APIs
 - ✅ **Mac compatible** - Optimized for Apple Silicon and Intel Macs
+
+## Limitations
+
+-PLACEHOLDER WORKFLOWS - RAG branch can be pulled as a template / actual Workflows need WORK
+-TESTING REQUIRED
 
 ## Quick Start
 
@@ -272,12 +279,9 @@ llama-cag-n8n/
 └── start_services.py          # Service management script
 ```
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgements
 
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) for enabling local LLM inference with large context windows
 - [n8n](https://n8n.io/) for the workflow automation platform
-- All contributors to this project
+
