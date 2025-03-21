@@ -1,293 +1,569 @@
 {
-  "name": "Enhanced CAG/RAG Query Processing",
+  "name": "RETRIEVAL",
   "nodes": [
     {
-      "parameters": {
-        "path": "cag/query",
-        "options": {
-          "responseMode": "responseNode"
-        },
-        "authentication": "none"
-      },
-      "name": "Webhook",
-      "type": "n8n-nodes-base.webhook",
+      "parameters": {},
+      "name": "Cron (Daily Warm-up)",
+      "type": "n8n-nodes-base.cron",
       "typeVersion": 1,
-      "position": [250, 300]
-    },
-    {
-      "parameters": {
-        "functionCode": "// Enhanced query extraction and validation\nconst requestData = $input.item.json;\n\n// Extract query parameters with validation\nconst query = requestData.query?.trim() || '';\nconst documentSources = Array.isArray(requestData.documentSources) ? \n                      requestData.documentSources : \n                      (requestData.documentSources ? [requestData.documentSources] : []);\n\n// Optional parameters with defaults\nconst maxTokens = parseInt(requestData.maxTokens) || 1024;\nconst temperature = parseFloat(requestData.temperature) || 0.7;\nconst customPrompt = requestData.customPrompt || null;\nconst clientId = requestData.clientId || 'anonymous';\nconst requestId = requestData.requestId || null;\n\n// Generate unique query ID with better structure\nconst timestamp = Date.now();\nconst randomStr = Math.random().toString(36).substring(2, 7);\nconst queryId = requestId || `query_${timestamp}_${randomStr}`;\n\n// Validate input\nlet isValid = true;\nlet validationError = null;\n\nif (!query || query.length === 0) {\n  isValid = false;\n  validationError = 'Query is required';\n} else if (query.length > 2000) {\n  isValid = false;\n  validationError = 'Query exceeds maximum length of 2000 characters';\n}\n\n// Validate document sources if provided\nif (documentSources.length > 0) {\n  const invalidSources = documentSources.filter(source => \n    typeof source !== 'string' || source.trim().length === 0\n  );\n  \n  if (invalidSources.length > 0) {\n    isValid = false;\n    validationError = 'All document sources must be non-empty strings';\n  }\n}\n\n// Create metadata\nconst metadata = {\n  queryId,\n  query,\n  documentSources,\n  timestamp: new Date().toISOString(),\n  processingStartTime: Date.now(),\n  clientId,\n  maxTokens,\n  temperature,\n  customPrompt,\n  isValid,\n  validationError,\n  userAgent: $input.item.headers['user-agent'] || 'unknown'\n};\n\n// Log the incoming query\nconsole.log(`Processing query ${queryId}: \"${query.substring(0, 50)}${query.length > 50 ? '...' : ''}\" with ${documentSources.length} document sources`);\n\nreturn { json: metadata };"
-      },
-      "name": "Extract Query",
-      "type": "n8n-nodes-base.function",
-      "typeVersion": 1,
-      "position": [450, 300]
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "boolean": [
-            {
-              "value1": "={{ $json.isValid }}",
-              "value2": true
-            }
-          ]
-        }
-      },
-      "name": "Is Query Valid?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [650, 300]
-    },
-    {
-      "parameters": {
-        "functionCode": "// Enhanced query classification with multiple heuristics\nconst { query, queryId, documentSources, customPrompt } = $input.item.json;\n\n// Classifier 1: Document source specification\nconst hasDocumentSources = documentSources && documentSources.length > 0;\nlet documentSourceConfidence = hasDocumentSources ? 0.8 : 0.3;\n\n// Classifier 2: CAG-specific patterns in query\nconst cagPatterns = [\n  /what does .* say about/i,\n  /according to .* document/i,\n  /in the .* manual/i,\n  /based on the document/i,\n  /what is mentioned in/i,\n  /how does .* describe/i,\n  /show me .* from the document/i,\n  /extract .* from the document/i,\n  /what is the process for/i,\n  /what are the steps for/i,\n  /is there .* in the document/i,\n  /does the document mention/i,\n  /find .* in the document/i,\n  /what section/i,\n  /cite where/i,\n  /referring to the/i\n];\n\n// Check for CAG patterns\nlet matchedPatterns = [];\nfor (const pattern of cagPatterns) {\n  if (pattern.test(query)) {\n    matchedPatterns.push(pattern.toString());\n  }\n}\n\nlet patternConfidence = matchedPatterns.length > 0 ? \n                        Math.min(0.6 + (matchedPatterns.length * 0.1), 0.9) : \n                        0.2;\n\n// Classifier 3: Word-based features\nconst cagSignalWords = ['document', 'text', 'article', 'mentioned', 'stated', 'written', 'report', 'passage', 'content'];\nconst ragSignalWords = ['generally', 'typically', 'usually', 'common', 'standard', 'conventional', 'universal'];\n\nconst words = query.toLowerCase().split(/\\W+/).filter(w => w.length > 2);\nconst cagWordCount = words.filter(w => cagSignalWords.includes(w)).length;\nconst ragWordCount = words.filter(w => ragSignalWords.includes(w)).length;\n\nlet wordConfidence = 0.5; // Neutral by default\nif (cagWordCount > ragWordCount) {\n  wordConfidence = 0.5 + (0.1 * Math.min(cagWordCount - ragWordCount, 3));\n} else if (ragWordCount > cagWordCount) {\n  wordConfidence = 0.5 - (0.1 * Math.min(ragWordCount - cagWordCount, 3));\n}\n\n// Classifier 4: Custom prompt override\nlet promptOverrideConfidence = 0.5; // Neutral\nif (customPrompt) {\n  if (customPrompt.toLowerCase().includes('document') || \n      customPrompt.toLowerCase().includes('specific') ||\n      customPrompt.toLowerCase().includes('context')) {\n    promptOverrideConfidence = 0.7; // Lean toward CAG\n  } else {\n    promptOverrideConfidence = 0.3; // Lean toward RAG\n  }\n}\n\n// Combine classifier confidences with weights\nconst weightedConfidence = (\n  documentSourceConfidence * 0.4 + \n  patternConfidence * 0.3 + \n  wordConfidence * 0.2 + \n  promptOverrideConfidence * 0.1\n);\n\n// Final classification\nconst isCagQuery = weightedConfidence >= 0.5;\nconst queryType = isCagQuery ? 'cag' : 'rag';\n\n// Calculate confidence level\nlet confidenceLevel;\nif (weightedConfidence > 0.8) {\n  confidenceLevel = 'high';\n} else if (weightedConfidence > 0.6) {\n  confidenceLevel = 'medium';\n} else {\n  confidenceLevel = 'low';\n}\n\n// Create classification summary\nconst classificationReason = {\n  hasDocumentSources,\n  matchedPatterns,\n  cagWordCount,\n  ragWordCount,\n  documentSourceConfidence,\n  patternConfidence,\n  wordConfidence,\n  promptOverrideConfidence,\n  weightedConfidence\n};\n\nconsole.log(`Classified query ${queryId} as ${queryType.toUpperCase()} with ${confidenceLevel} confidence (${(weightedConfidence * 100).toFixed(1)}%)`);\n\nreturn {\n  json: {\n    ...$input.item.json,\n    queryType,\n    confidence: confidenceLevel,\n    confidenceScore: weightedConfidence,\n    classificationReason,\n    classificationSummary: hasDocumentSources ? \n      `Specific document sources provided` : \n      (matchedPatterns.length > 0 ? \n        `Query matches ${matchedPatterns.length} document-specific patterns` : \n        `Query classification based on word analysis`)\n  }\n};"
-      },
-      "name": "Enhanced Query Classification",
-      "type": "n8n-nodes-base.function",
-      "typeVersion": 1,
-      "position": [850, 200]
-    },
-    {
-      "parameters": {
-        "mode": "expression",
-        "output": "={{ $input.item.json.queryType === 'cag' ? 0 : 1 }}"
-      },
-      "name": "Route By Query Type",
-      "type": "n8n-nodes-base.router",
-      "typeVersion": 1,
-      "position": [1050, 200]
-    },
-    {
-      "parameters": {
-        "functionCode": "// Build a structured, invalid query response\nconst { queryId, validationError } = $input.item.json;\n\nreturn {\n  json: {\n    queryId,\n    success: false,\n    error: validationError || 'Invalid query',\n    processedAt: new Date().toISOString(),\n    processingTime: Date.now() - ($input.item.json.processingStartTime || Date.now())\n  }\n};"
-      },
-      "name": "Return Validation Error",
-      "type": "n8n-nodes-base.function",
-      "typeVersion": 1,
-      "position": [850, 400]
-    },
-    {
-      "parameters": {
-        "functionCode": "// Enhanced database query for finding relevant KV caches\nconst { query, documentSources, queryId } = $input.item.json;\n\n// SQL query builder with multiple relevance strategies\nlet dbQuery = 'SELECT * FROM cag_document_registry WHERE cag_status = \\'cached\\'';\nlet queryParams = [];\nlet paramIndex = 1;\nlet orderClauses = [];\nlet whereConditions = [];\n\n// Strategy 1: Filter by document sources if specified\nif (documentSources && documentSources.length > 0) {\n  let sourceConditions = [];\n  \n  documentSources.forEach((source, index) => {\n    sourceConditions.push(`document_id LIKE $${paramIndex} OR file_name LIKE $${paramIndex}`);\n    queryParams.push('%' + source + '%');\n    paramIndex++;\n  });\n  \n  if (sourceConditions.length > 0) {\n    whereConditions.push(`(${sourceConditions.join(' OR ')})`);\n  }\n}\n\n// Strategy 2: Keyword matching for content relevance\n// This is a simple approach - in a real system this would use embeddings\nif (query && query.length > 0) {\n  // Extract meaningful keywords from the query (simple approach)\n  const stopWords = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'about', 'like', 'from'];\n  const keywords = query.toLowerCase()\n    .replace(/[^\\w\\s]/g, '')\n    .split(/\\s+/)\n    .filter(word => word.length > 2 && !stopWords.includes(word));\n  \n  // If we have keywords, use them for ordering by relevance\n  if (keywords.length > 0) {\n    // We'll prioritize section titles containing keywords\n    let keywordConditions = [];\n    \n    keywords.forEach(keyword => {\n      keywordConditions.push(`CASE WHEN section_title ILIKE $${paramIndex} THEN 1 ELSE 0 END`);\n      queryParams.push('%' + keyword + '%');\n      paramIndex++;\n    });\n    \n    // Add a relevance score for ordering\n    orderClauses.push(`(${keywordConditions.join(' + ')}) DESC`);\n  }\n}\n\n// Strategy 3: Usage statistics - prioritize frequently used and recent caches\norderClauses.push('usage_count DESC');\norderClauses.push('last_used DESC NULLS LAST');\n\n// Build the complete query\nif (whereConditions.length > 0) {\n  dbQuery += ' AND ' + whereConditions.join(' AND ');\n}\n\n// Add ordering\nif (orderClauses.length > 0) {\n  dbQuery += ' ORDER BY ' + orderClauses.join(', ');\n}\n\n// Limit results \ndbQuery += ' LIMIT 5';\n\n// Log the query for debugging\nconsole.log(`Database query for ${queryId}: ${dbQuery} with params: ${JSON.stringify(queryParams)}`);\n\nreturn {\n  json: {\n    ...$input.item.json,\n    dbQuery,\n    queryParams\n  }\n};"
-      },
-      "name": "Prepare CAG Cache Query",
-      "type": "n8n-nodes-base.function",
-      "typeVersion": 1,
-      "position": [1250, 100]
+      "position": [
+        680,
+        1680
+      ],
+      "id": "71c795f1-1614-4223-ab29-0d45c2371d80"
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "={{ $json.dbQuery }}",
-        "additionalFields": {
-          "queryParams": "={{ $json.queryParams }}"
-        }
+        "query": "-- Select document summaries or metadata for warm-up\n-- Customize this query to retrieve the specific context you want to preload\nSELECT \n    d.document_title AS title,\n    string_agg(c.section_title || ': ' || LEFT(c.chunk_text, 500), '\n') AS summary\nFROM documents d\nJOIN cag_document_registry c ON d.document_id = c.document_id\nWHERE d.status = 'cached'\nGROUP BY d.document_id, d.document_title",
+        "additionalFields": {}
       },
-      "name": "Find Relevant KV Caches",
+      "name": "Retrieve Context",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 1,
-      "position": [1450, 100],
-      "credentials": {
-        "postgres": {
-          "id": "1",
-          "name": "PostgreSQL account"
-        }
-      }
+      "position": [
+        900,
+        1680
+      ],
+      "id": "42fe713c-8189-48b9-9036-4f4dd99f029f"
     },
     {
       "parameters": {
-        "conditions": {
-          "number": [
+        "functionCode": "const items = $input.all();\nconst warmUpPrompts = [];\n\nfor (const item of items) {\n  const { title, summary } = item.json;\n  // Construct a structured warm-up prompt\n  const prompt = `[WARM-UP] Document: ${title}\\nContext Summary:\\n${summary}\\n[END WARM-UP]`;\n  warmUpPrompts.push({ json: { prompt } });\n}\n\nreturn warmUpPrompts;"
+      },
+      "name": "Prepare Warm-Up Prompts",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        1680
+      ],
+      "id": "0960f386-f42c-4736-a6e1-80671f52eecb"
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        1680
+      ],
+      "id": "5f51b294-4c99-4b17-9910-081a8591c323"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.LLAMACPP_SERVER_URL }}/completion",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
             {
-              "value1": "={{ $json.rows.length }}",
-              "operation": "larger",
-              "value2": 0
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            },
+            {
+              "name": "cache_prompt",
+              "value": true
+            },
+            {
+              "name": "n_predict",
+              "value": 0
+            },
+            {
+              "name": "n_keep",
+              "value": "={{ $json.prompt.length + 1 }}"
             }
           ]
-        }
+        },
+        "options": {}
       },
-      "name": "Found KV Caches?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [1650, 100]
+      "name": "Warm-Up Inference",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1560,
+        1680
+      ],
+      "id": "15d720c2-bf52-48bf-9da2-174ad5ed7658"
     },
     {
       "parameters": {
-        "conditions": {
-          "number": [
+        "functionCode": "// Simple logging of warm-up status\nconst { prompt } = $json;\nconsole.log(`Warm-up prompt sent: ${prompt.substring(0, 50)}...`);\nreturn $input.all();"
+      },
+      "name": "Log Warm-Up",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        1680
+      ],
+      "id": "9cb3696f-4060-4ed9-8b3c-edf1a717f3c2"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "query",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        660,
+        2220
+      ],
+      "webhookId": "f1a6c1f0-d1e8-4f07-b824-8c72f1c1e1d0",
+      "id": "070ed37c-b668-4f41-ac2b-e90dfaba453e"
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nlet context = \"\";\n\nif (!items || items.length === 0 || !items[0].json) {\n  return [{ json: { context: \"[No relevant context found]\", foundContext: false } }];\n}\n\nfor (const item of items) {\n  const { section_title, chunk_text, document_title, document_id } = item.json;\n  context += `Document: ${document_title} (ID: ${document_id})\\n`;\n  context += `Section: ${section_title}\\n`;\n  context += `Chunk: ${chunk_text}\\n\\n`;\n}\n\nreturn [{ json: { context: context.trim(), foundContext: true } }];"
+      },
+      "name": "Aggregate Context",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        2220
+      ],
+      "id": "c32d8926-144f-48b4-bfe2-a5928fa64b31"
+    },
+    {
+      "parameters": {
+        "functionCode": "const userQuery = $input.item.json.query || $workflow.execution.data.initialInput.body.query;\nconst context = $input.item.json.context;\n\n// Build the final composite prompt\nconst prompt = `Context:\\n${context}\\n\\nUser Query: ${userQuery}\\n\\nAnswer:`;\n\nreturn [{ json: { prompt, userQuery, context } }];"
+      },
+      "name": "Construct Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        2220
+      ],
+      "id": "3e455dd9-3ac1-4fc2-8438-490a7417e4cf"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.LLAMACPP_SERVER_URL }}/completion",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
             {
-              "value1": "={{ $json.rows.length }}",
-              "operation": "equal",
-              "value2": 1
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            },
+            {
+              "name": "n_predict",
+              "value": 512
             }
           ]
-        }
+        },
+        "options": {}
       },
-      "name": "Single or Multiple Caches?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [1850, 50]
+      "name": "Inference",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1560,
+        2220
+      ],
+      "id": "66edb332-f418-4204-9eec-3f03dfa87548"
     },
     {
       "parameters": {
-        "functionCode": "// Enhanced command preparation for querying a single KV cache\nconst { rows, query, maxTokens, temperature, customPrompt } = $input.item.json;\n\n// Get model name from environment or use default\nconst modelName = process.env.LLAMACPP_MODEL_NAME || 'gemma-4b.gguf';\n\n// Get cache path from first row\nconst cachePath = rows[0].kv_cache_path;\n\n// Format query - check if we have a custom prompt\nlet formattedQuery;\nif (customPrompt) {\n  formattedQuery = customPrompt.replace('{{QUERY}}', query);\n} else {\n  formattedQuery = `Based on the specific information in the document, please answer this question:\\n\\nQuestion: ${query}\\n\\nProvide a detailed answer using only facts from the document. If the document doesn't contain relevant information, please state that.`;\n}\n\n// Create command with optional temperature parameter\nconst tempParam = temperature !== undefined ? `--temp ${temperature}` : '';\n\n// Standard tokens to use - respect user request but have reasonable limits\nconst safeMaxTokens = Math.min(Math.max(maxTokens || 1024, 64), 4096);\n\nconst command = `cag-scripts/query_kv_cache.sh /usr/local/llamacpp/models/${modelName} ${cachePath} \"${formattedQuery}\" ${safeMaxTokens} ${tempParam}`;\n\n// Track usage information for this cache\nconst cacheInfo = {\n  cacheId: rows[0].chunk_id,\n  documentId: rows[0].document_id,\n  fileName: rows[0].file_name,\n  sectionTitle: rows[0].section_title || 'Untitled section',\n  lastUsed: new Date().toISOString(),\n  contextSize: rows[0].context_size || 'unknown'\n};\n\nreturn {\n  json: {\n    ...$input.item.json,\n    command,\n    cacheInfo,\n    multipleChunks: false\n  }\n};"
+        "functionCode": "const llmResponse = $input.item.json.content;\nconst userQuery = $input.item.json.userQuery;\n\n// Process and trim the LLM response\nconst answer = llmResponse.trim();\n\nreturn [{ json: { answer, query: userQuery, context: $input.item.json.context } }];"
       },
-      "name": "Prepare Single Cache Query",
+      "name": "Process Response",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [2050, 0]
+      "position": [
+        1780,
+        2220
+      ],
+      "id": "d7ae5fb8-e352-4462-b46c-240cc04bf040"
     },
     {
       "parameters": {
-        "command": "={{ $json.command }}"
+        "options": {}
       },
-      "name": "Query Single KV Cache",
-      "type": "n8n-nodes-base.executeCommand",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [2250, 0]
+      "position": [
+        2220,
+        2220
+      ],
+      "id": "eeeed146-ae27-49d9-84f4-8b6451c2eb47"
     },
     {
       "parameters": {
-        "functionCode": "// Enhanced preparation for multiple KV cache query\nconst { rows, query, maxTokens, temperature, customPrompt } = $input.item.json;\n\n// Get model name from environment or use default\nconst modelName = process.env.LLAMACPP_MODEL_NAME || 'gemma-4b.gguf';\n\n// Extract all cache paths\nconst cachePaths = rows.map(row => row.kv_cache_path);\n\n// Format query - check if we have a custom prompt\nlet formattedQuery;\nif (customPrompt) {\n  formattedQuery = customPrompt.replace('{{QUERY}}', query);\n} else {\n  formattedQuery = `Based on the information in multiple documents or sections, please answer this question:\\n\\nQuestion: ${query}\\n\\nProvide a detailed answer using only facts from the documents. If no document contains relevant information, please state that. Include section references if possible.`;\n}\n\n// Create command with parameters\nconst tempParam = temperature !== undefined ? `--temp ${temperature}` : '';\n\n// Standard tokens to use - respect user request but have reasonable limits\nconst safeMaxTokens = Math.min(Math.max(maxTokens || 1024, 64), 4096);\n\n// Build command to query multiple caches\nconst command = `cag-scripts/query_multiple_kv_caches.sh /usr/local/llamacpp/models/${modelName} \"${formattedQuery}\" ${safeMaxTokens} ${tempParam} ${cachePaths.join(' ')}`;\n\n// Track cache information for response\nconst cacheInfo = rows.map(row => ({\n  cacheId: row.chunk_id,\n  documentId: row.document_id,\n  fileName: row.file_name,\n  sectionTitle: row.section_title || 'Untitled section',\n  lastUsed: new Date().toISOString(),\n  contextSize: row.context_size || 'unknown'\n}));\n\nreturn {\n  json: {\n    ...$input.item.json,\n    command,\n    cacheInfo,\n    cacheCount: rows.length,\n    multipleChunks: true\n  }\n};"
+        "functionCode": "const processingTime = Date.now() - $workflow.execution.startedAt;\nconst contextLength = $input.item.json.context ? $input.item.json.context.length : 0;\n\nreturn [{ json: { processingTime, contextLength, query: $input.item.json.query } }];"
       },
-      "name": "Prepare Multiple Cache Query",
+      "name": "Log Metrics",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [2050, 100]
+      "position": [
+        2000,
+        2220
+      ],
+      "id": "29bc0104-7240-40c7-b5b4-880829e1dffb"
     },
     {
       "parameters": {
-        "command": "={{ $json.command }}"
+        "operation": "executeQuery",
+        "query": "-- Retrieve context chunks based on semantic similarity\nWITH user_query AS (\n  SELECT '{{ $json.body.query }}'::text AS query_text\n)\nSELECT\n  c.chunk_id,\n  c.section_title,\n  c.chunk_text,\n  d.document_title,\n  d.document_id\nFROM cag_document_registry c\nJOIN documents d ON c.document_id = d.document_id\nWHERE d.status = 'cached'\n  AND c.cag_status = 'cached'\n  AND c.chunk_text ILIKE '%' || (SELECT query_text FROM user_query) || '%'\nORDER BY c.chunk_text ILIKE '%' || (SELECT query_text FROM user_query) || '%'\nLIMIT 5;",
+        "additionalFields": {}
       },
-      "name": "Query Multiple KV Caches",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [2250, 100]
-    },
-    {
-      "parameters": {
-        "operation": "update",
-        "schema": "public",
-        "table": "cag_document_registry",
-        "updateKey": "chunk_id",
-        "columns": "last_used, usage_count",
-        "additionalFields": {
-          "last_used": "=NOW()",
-          "usage_count": "=usage_count + 1"
-        }
-      },
-      "name": "Update Cache Usage Stats",
+      "name": "Retrieve Context1",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 1,
-      "position": [2050, 200],
-      "credentials": {
-        "postgres": {
-          "id": "1",
-          "name": "PostgreSQL account"
-        }
-      }
+      "position": [
+        900,
+        2220
+      ],
+      "id": "8e647c74-677d-464b-8ccf-12e96cf1b8ca"
     },
     {
       "parameters": {
-        "functionCode": "// Enhanced RAG implementation using vector database\nconst { query, queryId, maxTokens, temperature, customPrompt } = $input.item.json;\n\n// Generate RAG embeddings for the query\nconst embeddingGeneration = async (text) => {\n  try {\n    // In a real implementation, this would call an embedding model API\n    // For this implementation, we'll use a basic text hashing approach as a placeholder\n    return Array.from(text.toLowerCase())\n      .map(char => char.charCodeAt(0))\n      .reduce((acc, val, i) => {\n        acc[i % 10] = (acc[i % 10] || 0) + val;\n        return acc;\n      }, [])\n      .map(val => val / 1000); // Normalize\n  } catch (error) {\n    console.error(`Error generating embeddings: ${error.message}`);\n    return null;\n  }\n};\n\n// Step 1: Find relevant chunks based on query similarity\nasync function findRelevantDocuments() {\n  try {\n    // Get query embedding\n    const queryEmbedding = await embeddingGeneration(query);\n    if (!queryEmbedding) throw new Error('Failed to generate query embedding');\n    \n    // In a real implementation, this would search a vector database like Pinecone, Qdrant, etc.\n    // For this implementation, we'll do a simple database search\n    \n    // Prepare SQL query to find documents based on keyword matching\n    // This is a simplistic approach - real system would use vector similarity search\n    const words = query.toLowerCase()\n      .replace(/[^\\w\\s]/g, '')\n      .split(/\\s+/)\n      .filter(word => word.length > 2);\n    \n    if (words.length === 0) {\n      return [];\n    }\n    \n    // Create SQL query with keyword matching (placeholder for vector search)\n    let sqlConditions = [];\n    const sqlParams = [];\n    let paramCount = 1;\n    \n    // Add conditions for each meaningful word\n    words.forEach(word => {\n      sqlConditions.push(`section_title ILIKE $${paramCount} OR document_title ILIKE $${paramCount}`);\n      sqlParams.push(`%${word}%`);\n      paramCount++;\n    });\n    \n    // Build query\n    const sql = `\n      SELECT \n        d.document_id, \n        d.document_title,\n        d.file_name,\n        c.section_title,\n        c.chunk_id,\n        c.chunk_index,\n        c.total_chunks,\n        c.content_hash\n      FROM \n        documents d\n      JOIN \n        cag_document_registry c ON d.document_id = c.document_id\n      WHERE \n        c.cag_status = 'cached' AND\n        (${sqlConditions.join(' OR ')})\n      ORDER BY \n        d.created_at DESC\n      LIMIT 10\n    `;\n    \n    // Execute query\n    const { stdout: queryResult } = await $exec(`psql -t -c \"${sql.replace(/\\$/g, '\\\\$')}\" -d llamacag -U llamacag`);\n    \n    // Parse results (simplified)\n    const results = queryResult.split('\\n')\n      .filter(line => line.trim())\n      .map(line => {\n        const parts = line.split('|').map(p => p.trim());\n        return {\n          documentId: parts[0],\n          documentTitle: parts[1],\n          fileName: parts[2],\n          sectionTitle: parts[3],\n          chunkId: parts[4],\n          relevanceScore: 0.8 // Mock score\n        };\n      });\n    \n    return results;\n  } catch (error) {\n    console.error(`Error in document search: ${error.message}`);\n    return [];\n  }\n}\n\n// Step 2: Retrieve content from the relevant documents\nasync function retrieveDocumentContent(relevantDocs) {\n  if (!relevantDocs || relevantDocs.length === 0) {\n    return [];\n  }\n  \n  try {\n    // In a real implementation, this would retrieve the actual text content\n    // For this implementation, we'll just simulate it\n    return relevantDocs.map(doc => ({\n      ...doc,\n      content: `This is simulated content for document ${doc.documentId}, section \"${doc.sectionTitle}\". In a real implementation, this would contain the actual text content retrieved from a database or file storage.`\n    }));\n  } catch (error) {\n    console.error(`Error retrieving document content: ${error.message}`);\n    return [];\n  }\n}\n\n// Step 3: Build prompt with retrieved content\nfunction buildRAGPrompt(documents) {\n  let contextContent = '';\n  \n  // Add each document's content to context\n  documents.forEach((doc, index) => {\n    contextContent += `\\n[Document ${index + 1}] ${doc.documentTitle || doc.fileName}\\nSection: ${doc.sectionTitle}\\n${doc.content}\\n`;\n  });\n  \n  // Use custom prompt if provided, or build a default one\n  let fullPrompt;\n  if (customPrompt) {\n    fullPrompt = customPrompt.replace('{{QUERY}}', query).replace('{{CONTEXT}}', contextContent);\n  } else {\n    fullPrompt = `You are a helpful assistant that provides accurate information based on the retrieved content. Please answer the following question using ONLY the information provided in the context below. If the context doesn't contain relevant information, acknowledge this and provide a general response.\\n\\nContext:${contextContent}\\n\\nQuestion: ${query}\\n\\nAnswer:`;\n  }\n  \n  return fullPrompt;\n}\n\n// Step 4: Execute the RAG process\nasync function executeRAG() {\n  try {\n    // Find relevant documents\n    const relevantDocs = await findRelevantDocuments();\n    console.log(`Found ${relevantDocs.length} relevant documents for query ${queryId}`);\n    \n    // If no relevant documents, return early with a default response\n    if (relevantDocs.length === 0) {\n      return {\n        response: `I don't have specific document knowledge about \"${query}\". Please try a different query or provide more context.`,\n        sources: [],\n        success: true\n      };\n    }\n    \n    // Retrieve content from relevant documents\n    const documentsWithContent = await retrieveDocumentContent(relevantDocs);\n    \n    // Build the prompt with the retrieved content\n    const prompt = buildRAGPrompt(documentsWithContent);\n    \n    // Get model name from environment or use default\n    const modelName = process.env.LLAMACPP_MODEL_PATH || '/usr/local/llamacpp/models/gemma-4b.gguf';\n    \n    // Standard tokens to use - respect user request but have reasonable limits\n    const safeMaxTokens = Math.min(Math.max(maxTokens || 1024, 64), 4096);\n    \n    // Create temp prompt file\n    const tempPromptFile = `/tmp/rag_prompt_${queryId}.txt`;\n    await $exec(`echo \"${prompt.replace(/\"/g, '\\\\\"')}\" > ${tempPromptFile}`);\n    \n    // Create command with parameters\n    const tempParam = temperature !== undefined ? `--temp ${temperature}` : '';\n    const command = `$LLAMACPP_PATH/build/bin/main -m \"${modelName}\" -f \"${tempPromptFile}\" -n ${safeMaxTokens} ${tempParam}`;\n    \n    // Call the LLM\n    const { stdout, stderr, exitCode } = await $exec(command);\n    \n    // Clean up temp file\n    await $exec(`rm -f ${tempPromptFile}`);\n    \n    // Format sources for citation\n    const sources = documentsWithContent.map(doc => ({\n      documentId: doc.documentId,\n      documentTitle: doc.documentTitle,\n      fileName: doc.fileName,\n      sectionTitle: doc.sectionTitle,\n      relevanceScore: doc.relevanceScore\n    }));\n    \n    // Check if the response is valid\n    if (exitCode !== 0) {\n      throw new Error(`Model execution failed: ${stderr}`);\n    }\n    \n    return {\n      response: stdout,\n      sources,\n      success: true\n    };\n  } catch (error) {\n    console.error(`RAG process failed: ${error.message}`);\n    return {\n      response: `I encountered an error while processing your question: \"${error.message}\". Please try again later.`,\n      sources: [],\n      success: false,\n      error: error.message\n    };\n  }\n}\n\n// Execute RAG pipeline and return the results\nasync function processRAG() {\n  try {\n    console.log(`Processing RAG query: ${queryId}`);\n    const result = await executeRAG();\n    \n    return {\n      ...result,\n      queryId,\n      queryType: 'rag',\n      processedAt: new Date().toISOString(),\n      processingTime: Date.now() - ($input.item.json.processingStartTime || Date.now())\n    };\n  } catch (error) {\n    console.error(`RAG processing error: ${error.message}`);\n    return {\n      queryId,\n      queryType: 'rag',\n      success: false,\n      error: `RAG processing error: ${error.message}`,\n      processedAt: new Date().toISOString(),\n      processingTime: Date.now() - ($input.item.json.processingStartTime || Date.now())\n    };\n  }\n}\n\nreturn await processRAG();"
+        "url": "={{ $env.KNOWLEDGE_GRAPH_API_URL }}/query",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $json.body.query }}"
+            }
+          ]
+        },
+        "options": {}
       },
-      "name": "Enhanced RAG Process",
+      "name": "Query Knowledge Graph",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        900,
+        2700
+      ],
+      "id": "31744b76-4b62-428b-8110-72ab47cba8af"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Format the facts retrieved from the knowledge graph\n// Assuming the knowledge graph returns an array of facts\nconst items = $input.all();\n\nif (!items || items.length === 0 || !items[0].json) { \n  return [{ json: { facts: '[No relevant facts found]', hasFacts: false } }];\n}\n\nlet facts = \"\";\nfor (const item of items) {\n  // Adapt this to the actual structure of your knowledge graph response\n  if (item.json.fact) {\n    facts += `- ${item.json.fact}\\n`;\n  } else if (item.json.subject && item.json.predicate && item.json.object) {\n    facts += `- ${item.json.subject} ${item.json.predicate} ${item.json.object}\\n`;\n  }\n}\n\nreturn [{ json: { facts: facts.trim(), hasFacts: true } }];"
+      },
+      "name": "Format Facts",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [1250, 300]
+      "position": [
+        1120,
+        2700
+      ],
+      "id": "2a1745a5-5d76-4ccb-a65d-fd4be4a12f4e"
     },
     {
       "parameters": {
-        "functionCode": "// Prepare CAG fallback with improved error handling\nconst { query, queryId, maxTokens, temperature, customPrompt } = $input.item.json;\n\n// Use custom prompt if provided, or build a default fallback prompt\nlet prompt;\nif (customPrompt) {\n  prompt = customPrompt.replace('{{QUERY}}', query);\n} else {\n  prompt = `I don't have access to specific document knowledge about this query. I'll respond based on my general knowledge.\\n\\nQuery: ${query}`;\n}\n\n// Get model name from environment or use default\nconst modelName = process.env.LLAMACPP_MODEL_NAME || 'gemma-4b.gguf';\n\n// Set safe token limit\nconst safeMaxTokens = Math.min(Math.max(maxTokens || 1024, 64), 4096);\n\n// Create command with parameters\nconst tempParam = temperature !== undefined ? `--temp ${temperature}` : '';\nconst command = `cag-scripts/query_kv_cache.sh /usr/local/llamacpp/models/${modelName} ${process.env.LLAMACPP_KV_CACHE_DIR}/default_prompt.bin \"${prompt}\" ${safeMaxTokens} ${tempParam}`;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    prompt,\n    command,\n    fallback: true,\n    multipleChunks: false,\n    cacheInfo: [{\n      cacheId: 'default_prompt',\n      documentId: null,\n      fileName: null,\n      sectionTitle: 'General Knowledge',\n      type: 'fallback'\n    }]\n  }\n};"
+        "functionCode": "// Combine dynamic context, knowledge graph facts, and the user query\nconst userQuery = $input.item.json.query || $workflow.execution.data.initialInput.body.query;\nconst facts = $input.item.json.facts || \"[No relevant facts found]\";\n\nlet prompt = \"\";\n\n// Add facts if available\nif ($input.item.json.hasFacts) {\n  prompt += `Facts:\\n${facts}\\n\\n`;\n}\n\n// Append the user query\nprompt += `User Query: ${userQuery}\\n\\nAnswer:`;\n\nreturn [{ json: { prompt, userQuery, facts } }];"
       },
-      "name": "Prepare CAG Fallback",
+      "name": "Combine Context and Facts",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [1850, 150]
+      "position": [
+        1340,
+        2700
+      ],
+      "id": "c2fbba7b-4310-4936-89a8-56b291060689"
     },
     {
       "parameters": {
-        "command": "={{ $json.command }}"
+        "httpMethod": "POST",
+        "path": "query_kag",
+        "responseMode": "responseNode",
+        "options": {}
       },
-      "name": "Process CAG Fallback",
-      "type": "n8n-nodes-base.executeCommand",
+      "name": "Webhook1",
+      "type": "n8n-nodes-base.webhook",
       "typeVersion": 1,
-      "position": [2050, 150]
+      "position": [
+        680,
+        2700
+      ],
+      "webhookId": "a8b3f920-7c4d-4e6a-9b15-6f87e9d2a0c3",
+      "id": "cb206a08-693c-414b-9b9b-c23587cf6b6d"
     },
     {
       "parameters": {
-        "mode": "mergeByPosition"
+        "url": "={{ $env.LLAMACPP_SERVER_URL }}/completion",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            },
+            {
+              "name": "n_predict",
+              "value": 512
+            }
+          ]
+        },
+        "options": {}
       },
-      "name": "Merge CAG Responses",
-      "type": "n8n-nodes-base.merge",
+      "name": "Inference1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1560,
+        2700
+      ],
+      "id": "1e42670a-67e3-419f-b7f3-924a4a3f200c"
+    },
+    {
+      "parameters": {
+        "functionCode": "const llmResponse = $input.item.json.content;\nconst userQuery = $input.item.json.userQuery;\nconst facts = $input.item.json.facts;\n\nconst answer = llmResponse.trim();\n\nreturn [{ json: { answer, query: userQuery, facts } }];"
+      },
+      "name": "Process Response1",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        2700
+      ],
+      "id": "5c3b1b8d-0dd9-4423-b2c3-fc7d315c2206"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "name": "Respond to Webhook1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2220,
+        2700
+      ],
+      "id": "ce761d69-7631-4440-9f11-064b1850bc05"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Log performance and usage data\nconst processingTime = Date.now() - $workflow.execution.startedAt;\n\nreturn [{ json: { processingTime, query: $input.item.json.query, factsUsed: $input.item.json.hasFacts } }];"
+      },
+      "name": "Log Metrics1",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        2700
+      ],
+      "id": "9cacd1ce-62bf-472a-a4c1-fa8e535a6fa1"
+    },
+    {
+      "parameters": {
+        "content": "![Screenshot of workflow](https://raw.githubusercontent.com/AbelCoplet/llama-cag-n8N/main/docs/images/Screenshot%202025-03-20%20at%2020.02.09.png)",
+        "height": 800,
+        "width": 1020
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "d283eebe-f313-4c65-9622-1cfd9694bfeb",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "![Screenshot 1](https://raw.githubusercontent.com/AbelCoplet/llama-cag-n8N/main/docs/images/Capture%20d'%C3%A9cran%202025-03-21%20004453.png)",
+        "height": 800,
+        "width": 1120
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "9c35f856-f612-402b-b135-dece44704eb8",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "![Screenshot 2](https://raw.githubusercontent.com/AbelCoplet/llama-cag-n8N/main/docs/images/Capture%20d'%C3%A9cran%202025-03-21%20004523.png)",
+        "height": 460,
+        "width": 640
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1540
+      ],
+      "id": "a074b0a3-e1bc-47a3-a0ce-37c6ac0d3c54",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "![Screenshot 3](https://raw.githubusercontent.com/AbelCoplet/llama-cag-n8N/main/docs/images/Capture%20d'%C3%A9cran%202025-03-21%20004536.png)",
+        "height": 460,
+        "width": 640
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        2020
+      ],
+      "id": "37b9518f-c44d-4969-9716-30c25bc94eb5",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "![Screenshot 4](https://raw.githubusercontent.com/AbelCoplet/llama-cag-n8N/main/docs/images/Capture%20d'%C3%A9cran%202025-03-21%20004547.png)",
+        "height": 460,
+        "width": 640
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        2520
+      ],
+      "id": "b15256b2-6172-46b7-9671-24e610b3729e",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "![Screenshot 2025-03-20 at 20.02.49](https://raw.githubusercontent.com/AbelCoplet/llama-cag-n8N/main/docs/images/Screenshot%202025-03-20%20at%2020.02.49.png)",
+        "height": 460,
+        "width": 640
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        800
+      ],
+      "id": "f16945e0-6932-45ca-8657-d36798899e6e",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "content": "## CAG Retrieval from Local LLM . KV Cache management script separate\n**Double click** to edit me. [Guide](https://docs.n8n.io/workflows/sticky-notes/)",
+        "height": 460,
+        "width": 1800,
+        "color": 2
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        640,
+        800
+      ],
+      "id": "5c9f02b9-8080-40c9-9006-b65d167dea5f",
+      "name": "Sticky Note6"
+    },
+    {
+      "parameters": {
+        "content": "## CAG Simulation \"Warm Up\"",
+        "height": 460,
+        "width": 1800,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        640,
+        1540
+      ],
+      "id": "ceb5d966-aad9-452e-8fde-0f3da4f5f24d",
+      "name": "Sticky Note7"
+    },
+    {
+      "parameters": {
+        "content": "## Feeding Whole Prompt at Querry\n**Double click** to edit me. [Guide](https://docs.n8n.io/workflows/sticky-notes/)",
+        "height": 460,
+        "width": 1800,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        640,
+        2020
+      ],
+      "id": "f0247630-3069-4ac6-b461-89119bded693",
+      "name": "Sticky Note8"
+    },
+    {
+      "parameters": {
+        "content": "## KAG\n**Double click** to edit me. [Guide](https://docs.n8n.io/workflows/sticky-notes/)",
+        "height": 460,
+        "width": 1820,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        640,
+        2520
+      ],
+      "id": "43b1c13c-6a06-4fbc-9e7b-c4399895952b",
+      "name": "Sticky Note9"
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8000/query",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $json.query }}"
+            },
+            {
+              "name": "maxTokens",
+              "value": "={{ $json.maxTokens || 1024 }}"
+            },
+            {
+              "name": "temperature",
+              "value": "={{ $json.temperature || 0.7 }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Query CAG Model",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        880,
+        1000
+      ],
+      "id": "091549f0-3e05-4d7b-973e-5e9925667c20"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format response for user\nconst responseData = $input.item.json.data || {};\n\nreturn $input.item.json = {\n  query: $input.item.json.query || responseData.query,\n  response: responseData.response || 'No response received',\n  success: responseData.success !== false,\n  error: responseData.error || null,\n  processedAt: new Date().toISOString()\n};"
+      },
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2450, 75]
-    },
-    {
-      "parameters": {
-        "functionCode": "// Enhanced response formatting and metadata enrichment for CAG\nconst { queryId, query, queryType, rows, stdout, stderr, exitCode, processingStartTime, cacheInfo, multipleChunks, fallback } = $input.item.json;\n\n// Calculate processing time\nconst processingTime = Date.now() - processingStartTime;\n\n// Process the response text\nlet responseText = stdout;\nlet success = exitCode === 0;\nlet errorMessage = null;\n\n// Handle execution errors\nif (!success) {\n  errorMessage = `Error processing query: ${stderr}`;\n  responseText = `I encountered an error while processing your question. Please try again or rephrase your query.`;\n}\n\n// Extract and format source information\nlet sources = [];\nif (cacheInfo && Array.isArray(cacheInfo)) {\n  sources = cacheInfo.map(info => ({\n    documentId: info.documentId,\n    fileName: info.fileName,\n    section: info.sectionTitle || '',\n    type: info.type || 'document'\n  }));\n} else if (rows && rows.length > 0) {\n  sources = rows.map(row => ({\n    documentId: row.document_id,\n    fileName: row.file_name,\n    section: row.section_title || ''\n  }));\n}\n\n// Format citation string if sources are available\nlet citationText = '';\nif (sources.length > 0 && !fallback) {\n  citationText = '\\n\\nSources:\\n';\n  sources.forEach((source, index) => {\n    if (source.documentId && source.fileName) {\n      citationText += `[${index + 1}] ${source.fileName}${source.section ? ` - ${source.section}` : ''}\\n`;\n    }\n  });\n}\n\n// Add citation to response if available\nif (citationText && !responseText.includes('Sources:')) {\n  responseText += citationText;\n}\n\n// Create final response object with metadata\nconst finalResponse = {\n  queryId,\n  query,\n  response: responseText,\n  queryType,\n  sources,\n  usingCaches: !fallback,\n  multipleChunks: multipleChunks === true,\n  processedAt: new Date().toISOString(),\n  processingTime,\n  success,\n  errorMessage\n};\n\nreturn { json: finalResponse };"
-      },
-      "name": "Format CAG Response",
-      "type": "n8n-nodes-base.function",
-      "typeVersion": 1,
-      "position": [2650, 75]
-    },
-    {
-      "parameters": {
-        "operation": "insert",
-        "schema": "public",
-        "table": "query_log",
-        "columns": "query_id, query_text, response_text, query_type, document_sources, processed_at, processing_time, success, error_message",
-        "returnFields": "id",
-        "additionalFields": {
-          "document_ids": "={{ $json.sources ? $json.sources.map(s => s.documentId).filter(Boolean) : [] }}",
-          "chunks_used": "={{ $json.sources ? $json.sources.map(s => s.section).filter(Boolean) : [] }}",
-          "metadata": "={{ JSON.stringify({confidence: $json.confidence, multipleChunks: $json.multipleChunks, usingCaches: $json.usingCaches}) }}"
-        }
-      },
-      "name": "Log CAG Query in DB",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 1,
-      "position": [2850, 75],
-      "credentials": {
-        "postgres": {
-          "id": "1",
-          "name": "PostgreSQL account"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "operation": "insert",
-        "schema": "public",
-        "table": "query_log",
-        "columns": "query_id, query_text, response_text, query_type, processed_at, processing_time, success, error_message",
-        "returnFields": "id",
-        "additionalFields": {
-          "document_ids": "={{ $json.sources ? $json.sources.map(s => s.documentId).filter(Boolean) : [] }}",
-          "metadata": "={{ JSON.stringify({confidence: $json.confidence, ragType: 'vector_search'}) }}"
-        }
-      },
-      "name": "Log RAG Query in DB",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 1,
-      "position": [1450, 300],
-      "credentials": {
-        "postgres": {
-          "id": "1",
-          "name": "PostgreSQL account"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "mode": "mergeByPosition"
-      },
-      "name": "Merge All Responses",
-      "type": "n8n-nodes-base.merge",
-      "typeVersion": 2,
-      "position": [2850, 250]
+      "position": [
+        1080,
+        1000
+      ],
+      "id": "31569a77-4962-4895-bf78-f4d9760db21a"
     },
     {
       "parameters": {
@@ -298,280 +574,357 @@
       "name": "Return Response",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [3050, 250]
+      "position": [
+        1280,
+        1000
+      ],
+      "id": "6c1408ab-4336-4336-8a5d-f5847a0898e0"
+    },
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        680,
+        1000
+      ],
+      "id": "e28fa3fa-b358-4ff8-ba3e-7e99e5149acb",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        1720,
+        860
+      ],
+      "id": "645cd76f-8d84-4aea-9284-907caf028bb9",
+      "name": "When chat message received",
+      "webhookId": "3446d06b-d139-42ed-9a32-e8db9928b015"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-3-7-sonnet-20250219",
+          "cachedResultName": "Claude 3.7 Sonnet"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        1900,
+        1100
+      ],
+      "id": "8e1e65a3-32f1-4f81-bea1-0e3a39208a0f",
+      "name": "Anthropic Chat Model"
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.1,
+      "position": [
+        2200,
+        1100
+      ],
+      "id": "6db86ff7-d2e2-437d-b053-0dcbfb5e99de",
+      "name": "Call n8n Workflow Tool"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.8,
+      "position": [
+        2020,
+        860
+      ],
+      "id": "56699368-9545-4ea7-a91e-c2e63144264d",
+      "name": "PLACEHOLDER AGENT"
+    },
+    {
+      "parameters": {
+        "content": "## Configuration Instructions for Retrieval Workflow\n1. Environment Variable Configuration\nThe workflow references $env.LLAMACPP_SERVER_URL which needs to be set in n8n:\n\nIn n8n, go to Settings (gear icon) → Variables\nAdd a new variable:\n\nName: LLAMACPP_SERVER_URL\nValue: http://cag-bridge:8000 (if using Docker setup) or http://localhost:8000 (if running locally)\n\n\nSave your changes\n\n2. HTTP Request Node Configuration\nThe \"Query CAG Model\" node needs to be configured correctly:\n\nSelect the \"Query CAG Model\" node\nVerify the URL is set to {{ $env.LLAMACPP_SERVER_URL }}/query (or update it if needed)\nEnsure the Content-Type header is set to application/json\nVerify the body parameters contain:\n\nquery: ={{ $json.query }}\nmaxTokens: ={{ $json.maxTokens || 1024 }}\ntemperature: ={{ $json.temperature || 0.7 }}\n\n\n\n3. Master KV Cache Creation\nBefore using the retrieval workflow, ensure a master KV cache exists:\n\nRun the KV Cache Management workflow with the setAsMaster option set to true\nCheck that the master KV cache was created at the configured path (default: /data/kv_caches/master_cache.bin)\nNote: The CAG Bridge assumes this master cache exists for all queries\n\n4. Testing the Workflow\n\nCreate a test execution with input parameters:\njsonCopier{\n  \"query\": \"What are the key features of this system?\",\n  \"maxTokens\": 1024,\n  \"temperature\": 0.7\n}\n\nExecute the workflow and verify the response is properly formatted\n\n5. Endpoint Usage\nWhen integrating with other applications, use:\nCopierPOST http://localhost:5678/webhook/cag/query\nContent-Type: application/json\n\n{\n  \"query\": \"Your question about the document content\",\n  \"maxTokens\": 1024,\n  \"temperature\": 0.7\n}\nAdditional Recommendations\n\nError Handling: Consider adding error handling nodes to handle cases where the CAG Bridge is unavailable or the KV cache doesn't exist\nLogging: Add a node to log queries and responses for monitoring and debugging\nCaching: Consider implementing response caching for frequent queries to reduce load on the model",
+        "height": 1260,
+        "width": 720
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        0
+      ],
+      "id": "90e6f864-ae6f-4b50-ae6f-a78c8057ef96",
+      "name": "Sticky Note10"
+    },
+    {
+      "parameters": {
+        "content": "## Work in Progess\n\nAdditional Methods for Managing \"Memory\"",
+        "height": 260,
+        "width": 2440,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1280
+      ],
+      "id": "405aa1d5-96d1-453e-bf27-9d5a421691a1",
+      "name": "Sticky Note11"
+    },
+    {
+      "parameters": {
+        "content": "## Data Memory Management for Large Language Models: Project Overview\nWhat This Project Is About\nThis project develops a sophisticated system for enhancing how large language models (LLMs) work with documents using a technique called Context-Augmented Generation (CAG). Unlike traditional approaches that slice documents into tiny chunks, this system leverages large context window models (128K tokens) to process entire documents and store their \"memory state\" for quick recall later.\nThink of it like this: instead of giving an LLM random snippets of a book each time it's asked a question, this system lets the model \"read the whole book once\" and remember everything, making future questions much faster and more accurate.\nMain Scenarios & Concepts\n1. Context-Augmented Generation (KV Cache Management)\nWhat it is: The core innovation of this project - using \"memory snapshots\" (KV caches) of documents that models can instantly access.\nHow it works:\n\nDocuments are processed once by large context models\nThe model's internal state (its \"thoughts\" about the document) is saved as a KV cache\nFuture queries use this pre-computed knowledge without re-reading the document\n\nKey components: Document processing workflow, CAG Bridge, KV cache storage\n2. Document Optimization\nWhat it is: An intelligent preprocessing step that prepares documents for efficient storage.\nHow it works:\n\nUses Claude to clean up documents - removing redundancies and repetition\nPreserves the meaning and structure while optimizing token usage\nMakes documents more efficient for storage in the model's context window\n\nKey components: Document optimization workflow, Claude API integration\n3. Model Warm-up\nWhat it is: A technique to \"prime\" the model with relevant knowledge before queries.\nHow it works:\n\nPeriodically feeds document summaries to the model\nKeeps important information in the model's \"working memory\"\nImproves response speed and quality for frequent topics\n\nKey components: Scheduled triggers, document summary generation\n4. Knowledge-Augmented Generation (KAG)\nWhat it is: An extension that combines document knowledge with structured facts.\nHow it works:\n\nQueries structured knowledge sources alongside documents\nBlends factual information with contextual understanding\nProvides more comprehensive and accurate responses\n\nKey components: Knowledge graph integration, fact formatting\n5. System Maintenance\nWhat it is: Automated housekeeping to keep the system running efficiently.\nHow it works:\n\nCleans up temporary files and unused caches\nMonitors system health and usage patterns\nMaintains performance as document collections grow\n\nKey components: Maintenance workflow, database monitoring\n6. Retrieval-Augmented Generation (RAG)\nWhat it is: The popular approach of retrieving relevant chunks from a vector database to augment LLM responses.\nHow it fits in this design:\nWhile CAG is the primary focus of this project, RAG is intentionally designed as a complementary approach that can be called by the intelligent agent. The design intent allows for flexibility in how questions are answered:\nHow it works in this system:\n\nThe agent can evaluate each user query and decide the best approach\nFor some questions, the agent might call the CAG system for deep document knowledge\nFor others, it might call a RAG system for broader but shallower knowledge\nThe agent can even combine outputs from both systems for comprehensive answers\n\nWhy not the main focus: The project doesn't emphasize RAG implementation because there are already many excellent templates and implementations available. Instead, it focuses on the more innovative CAG approach while ensuring RAG compatibility.",
+        "height": 1700,
+        "width": 720,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        1280
+      ],
+      "id": "62bc15e6-8ad2-47b5-b651-1b8d54189445",
+      "name": "Sticky Note12"
     }
   ],
+  "pinData": {},
   "connections": {
+    "Cron (Daily Warm-up)": {
+      "main": [
+        [
+          {
+            "node": "Retrieve Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retrieve Context": {
+      "main": [
+        [
+          {
+            "node": "Prepare Warm-Up Prompts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Warm-Up Prompts": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches": {
+      "main": [
+        [
+          {
+            "node": "Warm-Up Inference",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Warm-Up Inference": {
+      "main": [
+        [
+          {
+            "node": "Log Warm-Up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Webhook": {
       "main": [
         [
           {
-            "node": "Extract Query",
+            "node": "Retrieve Context1",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Extract Query": {
+    "Aggregate Context": {
       "main": [
         [
           {
-            "node": "Is Query Valid?",
+            "node": "Construct Prompt",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Is Query Valid?": {
+    "Construct Prompt": {
       "main": [
         [
           {
-            "node": "Enhanced Query Classification",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Return Validation Error",
+            "node": "Inference",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Enhanced Query Classification": {
+    "Inference": {
       "main": [
         [
           {
-            "node": "Route By Query Type",
+            "node": "Process Response",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Route By Query Type": {
+    "Process Response": {
       "main": [
         [
           {
-            "node": "Prepare CAG Cache Query",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Enhanced RAG Process",
+            "node": "Log Metrics",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Prepare CAG Cache Query": {
+    "Log Metrics": {
       "main": [
         [
           {
-            "node": "Find Relevant KV Caches",
+            "node": "Respond to Webhook",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Find Relevant KV Caches": {
+    "Retrieve Context1": {
       "main": [
         [
           {
-            "node": "Found KV Caches?",
+            "node": "Aggregate Context",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Found KV Caches?": {
+    "Query Knowledge Graph": {
       "main": [
         [
           {
-            "node": "Single or Multiple Caches?",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Update Cache Usage Stats",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Prepare CAG Fallback",
+            "node": "Format Facts",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Single or Multiple Caches?": {
+    "Format Facts": {
       "main": [
         [
           {
-            "node": "Prepare Single Cache Query",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Prepare Multiple Cache Query",
+            "node": "Combine Context and Facts",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Prepare Single Cache Query": {
+    "Combine Context and Facts": {
       "main": [
         [
           {
-            "node": "Query Single KV Cache",
+            "node": "Inference1",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Query Single KV Cache": {
+    "Webhook1": {
       "main": [
         [
           {
-            "node": "Merge CAG Responses",
+            "node": "Query Knowledge Graph",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Prepare Multiple Cache Query": {
+    "Inference1": {
       "main": [
         [
           {
-            "node": "Query Multiple KV Caches",
+            "node": "Process Response1",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Query Multiple KV Caches": {
+    "Process Response1": {
       "main": [
         [
           {
-            "node": "Merge CAG Responses",
-            "type": "main",
-            "index": 1
-          }
-        ]
-      ]
-    },
-    "Enhanced RAG Process": {
-      "main": [
-        [
-          {
-            "node": "Log RAG Query in DB",
+            "node": "Log Metrics1",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Prepare CAG Fallback": {
+    "Log Metrics1": {
       "main": [
         [
           {
-            "node": "Process CAG Fallback",
+            "node": "Respond to Webhook1",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Process CAG Fallback": {
+    "Query CAG Model": {
       "main": [
         [
           {
-            "node": "Merge CAG Responses",
-            "type": "main",
-            "index": 2
-          }
-        ]
-      ]
-    },
-    "Update Cache Usage Stats": {
-      "main": [
-        []
-      ]
-    },
-    "Merge CAG Responses": {
-      "main": [
-        [
-          {
-            "node": "Format CAG Response",
+            "node": "Format Response",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Format CAG Response": {
-      "main": [
-        [
-          {
-            "node": "Log CAG Query in DB",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Log CAG Query in DB": {
-      "main": [
-        [
-          {
-            "node": "Merge All Responses",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Log RAG Query in DB": {
-      "main": [
-        [
-          {
-            "node": "Merge All Responses",
-            "type": "main",
-            "index": 1
-          }
-        ]
-      ]
-    },
-    "Return Validation Error": {
-      "main": [
-        [
-          {
-            "node": "Merge All Responses",
-            "type": "main",
-            "index": 2
-          }
-        ]
-      ]
-    },
-    "Merge All Responses": {
+    "Format Response": {
       "main": [
         [
           {
@@ -581,18 +934,60 @@
           }
         ]
       ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Query CAG Model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "PLACEHOLDER AGENT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "PLACEHOLDER AGENT",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call n8n Workflow Tool": {
+      "ai_tool": [
+        [
+          {
+            "node": "PLACEHOLDER AGENT",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
+  "active": false,
   "settings": {
-    "executionOrder": "v1",
-    "saveExecutionProgress": true,
-    "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": ""
+    "executionOrder": "v1"
   },
-  "staticData": {},
-  "versionId": "query-processing-v2.0",
-  "id": "2",
+  "versionId": "96ef11ef-8c0c-4cb7-8c72-873c0f3012fa",
   "meta": {
-    "instanceId": "local"
-  }
+    "instanceId": "031b645215ae9b6f375e501b38c32a541dca72c391120eef6f1ad1015f3ee67f"
+  },
+  "id": "cLCMEjxOljNKVeXf",
+  "tags": []
 }

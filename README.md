@@ -2,8 +2,6 @@
 
 # llama-cag-n8n
 
-WORK IN PROGRESS
-
 A comprehensive implementation of Context-Augmented Generation (CAG) using llama.cpp and n8n, designed to leverage large context window models (128K+ tokens) for storing and querying entire documents.
 
 ## What is llama-cag-n8n?
@@ -16,14 +14,6 @@ This package provides a complete implementation of Context-Augmented Generation 
 - ✅ **Lower resource usage** - Only processes documents once
 - ✅ **Works offline** - No need for external APIs
 - ✅ **Mac compatible** - Optimized for Apple Silicon and Intel Macs
-
-## Limitations
-
--PLACEHOLDER WORKFLOWS - RAG branch can be pulled as a template / actual Workflows need WORK
--TESTING REQUIRED
-- The current implementation of multiple KV cache queries is not optimal and could be significantly improved.
-- The RAG implementation is a simplified placeholder and needs to be replaced with a proper vector database integration.
-- Error handling in the n8n workflows and bash scripts could be more robust.
 
 ## Quick Start
 
@@ -74,19 +64,19 @@ python start_services.py --profile cpu
 
 ### Step 5: Set up n8n (http://localhost:5678/)
 1. Create a local account
-2. Import both workflows from n8n/workflows/
+2. Import workflows from n8n/workflows/
 3. Configure the PostgreSQL credential:
    - Host: `db`
    - Database: `llamacag`
    - User: `llamacag`
    - Password: `your_secure_password_here` (from .env)
-4. Activate both workflows
+4. Activate the workflows
 
 ## Understanding CAG with Large Context Models
 
-The key differentiator of this system is using large context window models (128K+ tokens) for Context-Augmented Generation:
+Context-Augmented Generation (CAG) is an alternative to traditional RAG that leverages large context window models:
 
-1. **Entire Document Processing**: Rather than chunking documents into small pieces, we can process much larger sections or entire documents at once.
+1. **Entire Document Processing**: Rather than chunking documents into small pieces, we process much larger sections or entire documents at once.
 
 2. **KV Cache Storage**: The system creates and stores KV (Key-Value) caches that capture the model's state after processing the document. This is effectively "perfect memory" of the document content.
 
@@ -95,6 +85,23 @@ The key differentiator of this system is using large context window models (128K
 4. **Compared to Traditional RAG**:
    - RAG: Chunks → Embeds → Vector DB → Retrieves chunks → Combines → Processes
    - CAG: Entire document → KV Cache → Direct access to full context
+
+## System Architecture
+
+The system consists of several components:
+
+1. **Document Processing Workflow**: Processes documents and creates KV caches
+2. **CAG Query Workflow**: Queries the model using preloaded KV caches
+3. **CAG Bridge**: A Python service that connects n8n to the llama.cpp scripts
+4. **Database**: Stores metadata about documents and queries
+
+### Master KV Cache Approach
+
+For optimal performance, the system can use a "master KV cache" approach:
+- All relevant documents are combined into a single knowledge base
+- This is processed into a single master KV cache
+- All queries are run against this master cache
+- This approach provides the most comprehensive context for answers
 
 ## Supported Large Context Window Models
 
@@ -165,22 +172,33 @@ This script will:
 python start_services.py --profile cpu
 ```
 
-#### 5. Configure n8n
+#### 5. Create the CAG Bridge directory
+```bash
+mkdir -p bridge
+```
+
+#### 6. Copy the CAG Bridge script
+Create the file `bridge/cag_bridge.py` with the Python code provided in this repository, then make it executable:
+```bash
+chmod +x bridge/cag_bridge.py
+```
+
+#### 7. Configure n8n
 1. Open http://localhost:5678/
 2. Create a local account
-3. Import both workflows:
+3. Import workflows:
    - Go to Workflows → Import from File
-   - Select both files in n8n/workflows/
+   - Select workflow files in n8n/workflows/
 4. Configure PostgreSQL credential:
    - Host: `db`
    - Database: `llamacag` 
    - User: `llamacag`
    - Password: Your DB_PASSWORD from .env
-5. Activate both workflows by clicking "Active" toggle
+5. Activate workflows by clicking "Active" toggle
 
 ## Usage
 
-### Processing Large Documents
+### Processing Documents to Create KV Caches
 
 To process documents with CAG:
 
@@ -194,9 +212,9 @@ To process documents with CAG:
    - Create KV caches
    - Store metadata in the database
 
-NOTE: The system is configured to handle documents up to the model's context length (128K tokens by default). For extremely large documents that exceed this limit, the system will still chunk them, but into much larger chunks than traditional RAG systems.
+Alternatively, you can create a master KV cache by processing a combined document containing all your knowledge.
 
-### Querying Documents
+### Querying Using KV Caches
 
 You can query your documents through the API endpoint:
 
@@ -204,12 +222,13 @@ You can query your documents through the API endpoint:
 curl -X POST http://localhost:5678/webhook/cag/query \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "Summarize the key points from the technical documentation",
-    "documentSources": ["technical_manual.pdf"]
+    "query": "Summarize the key points from the technical documentation"
   }'
 ```
 
-The `cag` in `/webhook/cag/query` is a fixed part of the webhook path. The `documentSources` parameter refers to the filenames of the documents in the watch folder. The system uses the filename and database records to identify the corresponding document and its KV cache.
+This will use the master KV cache to answer your question based on the preloaded knowledge.
+
+This will use the master KV cache to answer your question based on the preloaded knowledge.
 
 ### Batch Processing Documents
 
@@ -272,6 +291,8 @@ python start_services.py --stop
 ```
 llama-cag-n8n/
 ├── .env.example               # Template for environment variables
+├── bridge/                    # CAG bridge service
+│   └── cag_bridge.py          # Python bridge between n8n and llama.cpp
 ├── database/
 │   └── schema.sql             # Database schema for CAG system
 ├── docker-compose.yml         # Docker configuration 
@@ -286,42 +307,7 @@ llama-cag-n8n/
 └── start_services.py          # Service management script
 ```
 
-## Enhanced Features (March 2025 Update)
-
-This update includes significant improvements to both the document processing and query workflows:
-
-### Document Processing Enhancements
-
-- **Robust File Validation**: Improved file validation with size and type checks
-- **Enhanced Text Extraction**: Added OCR capabilities for scanned documents
-- **Semantic Chunking**: Better document chunking that preserves document structure
-- **Improved Database Integration**: More comprehensive tracking and metadata
-- **Enhanced KV Cache Generation**: Better resource management and monitoring
-- **Automated Maintenance**: New workflow for system maintenance and cleanup
-
-### Query Processing Enhancements
-
-- **Improved Query Classification**: Better detection of CAG vs RAG queries
-- **Enhanced RAG Implementation**: Complete implementation of the RAG path
-- **Better Cache Selection**: Improved algorithms for finding relevant KV caches
-- **Source Citations**: Automatic addition of source citations to responses
-- **Performance Monitoring**: Detailed logging and performance tracking
-
-### Setup Instructions
-
-1. Update your database schema by running the schema.sql file
-2. Import the new maintenance workflow in n8n
-3. Schedule the maintenance workflow to run daily
-
-### OCR Support
-
-For OCR functionality to work with scanned PDFs, install these dependencies:
-- Tesseract OCR: `apt-get install tesseract-ocr` (Linux) or `brew install tesseract` (Mac)
-- Poppler utils: `apt-get install poppler-utils` (Linux) or `brew install poppler` (Mac)
-
 ## Acknowledgements
 
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) for enabling local LLM inference with large context windows
 - [n8n](https://n8n.io/) for the workflow automation platform
-```
-</write_to_file>

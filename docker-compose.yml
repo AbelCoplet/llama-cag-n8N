@@ -78,6 +78,26 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      
+  # New CAG Bridge service
+  cag-bridge:
+    image: python:3.9
+    container_name: llamacag-bridge
+    restart: unless-stopped
+    volumes:
+      - ./scripts/bash:/usr/local/bin/cag-scripts:ro
+      - ${LLAMACPP_PATH:-~/Documents/llama.cpp}:/usr/local/llamacpp:ro
+      - ${LLAMACPP_KV_CACHE_DIR:-~/cag_project/kv_caches}:/data/kv_caches
+      - ./bridge:/app
+    working_dir: /app
+    command: "python cag_bridge.py"
+    environment:
+      - MASTER_KV_CACHE=/data/kv_caches/${MASTER_KV_CACHE:-master_cache.bin}
+      - LLAMACPP_MODEL_PATH=/usr/local/llamacpp/models/${LLAMACPP_MODEL_NAME:-gemma-4b.gguf}
+      - LLAMACPP_MAX_CONTEXT=${LLAMACPP_MAX_CONTEXT:-128000}
+      - LLAMACPP_THREADS=${LLAMACPP_THREADS:-4}
+    ports:
+      - "${CAG_BRIDGE_PORT:-8000}:8000"
 
 volumes:
   n8n_data:
