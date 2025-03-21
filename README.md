@@ -6,6 +6,7 @@
     <img src="docs/images/Screenshot 2025-03-21 at 19.23.11.png" alt="Screenshot 9" style="margin-right: 10px;">
     <img src="docs/images/Screenshot 2025-03-21 at 19.23.32.png" alt="Screenshot 10" style="margin-right: 10px;">
     <img src="docs/images/Screenshot 2025-03-21 at 19.23.55.png" alt="Screenshot 11" style="margin-right: 10px;">
+    <img src="docs/images/Screenshot 2025-03-21 at 19.42.01.png" alt="Screenshot 12" style="margin-right: 10px;">
 </div>
 
 # llama-cag-n8n
